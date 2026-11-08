@@ -14,6 +14,10 @@ running anything.
 cargo run -- scan https://github.com/owner/repo
 ```
 
+Airlock is not published on any package registry yet. `cargo install airlock`
+and `npm install airlock` install unrelated projects that happen to share the
+name, so build from this repository.
+
 ## Planned checks
 
 - Known malicious dependencies
