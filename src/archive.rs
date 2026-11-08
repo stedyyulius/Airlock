@@ -45,7 +45,7 @@ impl Default for Limits {
         Self {
             max_download_bytes: 256 * MIB,
             max_unpacked_bytes: 1024 * MIB,
-            max_file_bytes: 5 * MIB,
+            max_file_bytes: 32 * MIB,
             max_metadata_bytes: MIB,
             max_entries: 200_000,
         }
