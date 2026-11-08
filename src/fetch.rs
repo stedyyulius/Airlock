@@ -19,6 +19,17 @@ pub enum FetchError {
     Network(ureq::Error),
 }
 
+impl FetchError {
+    /// Whether trying again could help.
+    pub fn is_temporary(&self) -> bool {
+        match self {
+            Self::Network(_) => true,
+            Self::Status(code) => *code == 429 || *code >= 500,
+            Self::NotFound | Self::Redirected => false,
+        }
+    }
+}
+
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -56,6 +67,17 @@ fn agent() -> ureq::Agent {
 pub fn open_archive(url: &str) -> Result<ureq::BodyReader<'static>, FetchError> {
     let response = check_status(agent().get(url).call())?;
     Ok(response.into_body().into_reader())
+}
+
+/// Downloads a small document of at most `limit` bytes.
+pub fn get(url: &str, limit: u64) -> Result<Vec<u8>, FetchError> {
+    let mut response = check_status(agent().get(url).call())?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .map_err(FetchError::Network)
 }
 
 /// Sends `body` and returns the response, which may be at most `limit` bytes.

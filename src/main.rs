@@ -3,9 +3,11 @@
 mod archive;
 mod autorun;
 mod behavior;
+mod deps;
 mod fetch;
 mod network;
 mod opaque;
+mod osv;
 mod refs;
 mod report;
 mod saved;
@@ -14,6 +16,7 @@ mod text;
 
 use archive::{Limits, read_archive};
 use autorun::AutoRun;
+use deps::Dependencies;
 use report::{Kind, PLAIN, Palette, Report, ScanInfo};
 use source::Target;
 use std::error::Error;
@@ -68,6 +71,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
 
     let mut report = Report::new();
     let mut autorun = AutoRun::default();
+    let mut dependencies = Dependencies::default();
     let mut files = 0;
     let mut bytes = 0;
 
@@ -82,6 +86,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
         behavior::scan(&file, &mut report);
         opaque::scan(&file, &mut report);
         autorun.scan(&file);
+        dependencies.scan(&file, &mut report);
     })?;
 
     // The host chose what to send, so check it sent what was asked for.
@@ -116,6 +121,9 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
 
     autorun.finish(&mut report);
 
+    println!("checking {} packages against OSV", dependencies.len());
+    let packages_checked = dependencies.check_all(&mut report);
+
     let name = source.name();
     let info = ScanInfo {
         name: &name,
@@ -127,7 +135,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
         path: folder,
         files,
         bytes,
-        packages_checked: 0,
+        packages_checked,
     };
 
     print!("\n{}", report.render(&info, Palette::for_terminal()));

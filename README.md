@@ -6,9 +6,9 @@ Paste a URL, and Airlock reads the repository in memory and lists what it finds,
 so you can decide. It never clones the repository, saves it to your disk, or
 runs any of its code.
 
-> **Status: early development.** Airlock lists the network addresses and
-> unreadable files it finds, but gives no safety verdict yet. Do not rely on it
-> to decide whether code is safe.
+> **Status: early development.** Airlock can flag known malicious packages and
+> dangerous behavior, but it can't prove that code is safe, and it never says
+> so. Do not rely on it alone to decide whether code is safe.
 
 ## Usage
 
@@ -27,15 +27,42 @@ The report prints in your terminal, and the last line shows where to find a copy
 in a file, `~/.airlock/report.txt`. Each scan replaces that file, so copy it if
 you want to keep it. It holds only Airlock's report, never the repository's files.
 
+To check dependencies, Airlock sends package names and versions to the public
+[OSV database](https://osv.dev). It sends nothing else from the repository.
+
+The exit code is 0 if there was nothing to report, 1 if there are findings to
+review, and 2 if the scan couldn't finish.
+
 Airlock is not published on any package registry yet. `cargo install airlock`
 and `npm install airlock` install unrelated projects that happen to share the
 name, so build from this repository.
 
+## What it reports
+
+**DANGER:** behavior that could harm your computer.
+
+- Known malicious packages
+- Code that downloads something and runs it
+- Code that contacts the internet automatically when installed or opened
+- Code that decodes hidden text and runs it
+- Code that hides where it connects to
+- Programs or archives disguised as another type of file
+
+**WARNING:** not proven harmful, but check it.
+
+- Other network calls and raw IP addresses
+- Everything that runs automatically when installed or opened
+- Dependencies with known security bugs
+- Packages that have had malicious releases, when no exact version is set
+- Anything Airlock couldn't read or check
+
+**NOTE:** listed so you can see it, not checked for safety.
+
+- Every other address in code, config, lockfiles and documentation
+
 ## Planned checks
 
-- Known malicious dependencies
-- Code that runs automatically on install, build or when a folder is opened
-- Obfuscated code, and code that downloads and runs other code
+- Obfuscated code
 - Code that reads secrets and sends them elsewhere
 - Suspicious packages, such as lookalikes of popular names
 
