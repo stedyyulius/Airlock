@@ -8,7 +8,7 @@
 //! before it is painted, so a repository can't send its own codes to a terminal.
 
 use crate::text::{Untrusted, escape};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::IsTerminal;
 
@@ -61,18 +61,56 @@ pub enum Kind {
     LockfileAddress,
     MentionedAddress,
     LocalAddress,
+    MinifiedCode,
+    CollapsedInReview,
     KnownVulnerable,
     NotRead,
     DependencyNotChecked,
     OpaqueFile,
+    VendoredPackages,
+    Submodule,
+    LinkOutside,
+    LongCodeLine,
+    EncodedBlob,
+    HiddenData,
+    UnusualCharacters,
+    RunsOnBuild,
     AutoRun,
+    AiInstructions,
+    ContainerAccess,
     IpAddress,
     NetworkCall,
     CallWithoutAddress,
+    RiskyHost,
+    HiddenAddress,
+    LookalikeLetters,
+    LookalikePackage,
+    UnusualPackageSource,
     HadMaliciousReleases,
+    WatchesUser,
+    ChecksForAnalysis,
+    InjectsCode,
+    WeakensSecurity,
+    CoversTracks,
+    HidesItsWindow,
+    StaysOnComputer,
+    ReadsSecrets,
     DisguisedFile,
+    InvisibleText,
+    ObfuscatedCode,
+    OffScreenCode,
+    HiddenCode,
     HidesConnection,
     RunsHiddenCode,
+    CallsRawIp,
+    UnsafePackageSource,
+    DestroysFiles,
+    DisablesSecurity,
+    ActsInSecret,
+    CryptoMiner,
+    RemoteControl,
+    StealsSecrets,
+    AutoRunHidden,
     AutoRunNetwork,
     DownloadsAndRuns,
     KnownMalicious,
@@ -84,19 +122,57 @@ impl Kind {
             Self::DocumentationAddress
             | Self::LockfileAddress
             | Self::MentionedAddress
-            | Self::LocalAddress => Level::Note,
+            | Self::LocalAddress
+            | Self::MinifiedCode
+            | Self::CollapsedInReview => Level::Note,
             Self::KnownVulnerable
             | Self::NotRead
             | Self::DependencyNotChecked
             | Self::OpaqueFile
+            | Self::VendoredPackages
+            | Self::Submodule
+            | Self::LinkOutside
+            | Self::LongCodeLine
+            | Self::EncodedBlob
+            | Self::HiddenData
+            | Self::UnusualCharacters
+            | Self::RunsOnBuild
             | Self::AutoRun
+            | Self::AiInstructions
+            | Self::ContainerAccess
             | Self::IpAddress
             | Self::NetworkCall
             | Self::CallWithoutAddress
-            | Self::HadMaliciousReleases => Level::Warning,
+            | Self::RiskyHost
+            | Self::HiddenAddress
+            | Self::LookalikeLetters
+            | Self::LookalikePackage
+            | Self::UnusualPackageSource
+            | Self::HadMaliciousReleases
+            | Self::WatchesUser
+            | Self::ChecksForAnalysis
+            | Self::InjectsCode
+            | Self::WeakensSecurity
+            | Self::CoversTracks
+            | Self::HidesItsWindow
+            | Self::StaysOnComputer
+            | Self::ReadsSecrets => Level::Warning,
             Self::DisguisedFile
+            | Self::InvisibleText
+            | Self::ObfuscatedCode
+            | Self::OffScreenCode
+            | Self::HiddenCode
             | Self::HidesConnection
             | Self::RunsHiddenCode
+            | Self::CallsRawIp
+            | Self::UnsafePackageSource
+            | Self::DestroysFiles
+            | Self::DisablesSecurity
+            | Self::ActsInSecret
+            | Self::CryptoMiner
+            | Self::RemoteControl
+            | Self::StealsSecrets
+            | Self::AutoRunHidden
             | Self::AutoRunNetwork
             | Self::DownloadsAndRuns
             | Self::KnownMalicious => Level::Danger,
@@ -109,21 +185,63 @@ impl Kind {
             Self::LockfileAddress => "Addresses in lockfiles",
             Self::MentionedAddress => "Other addresses in code and config",
             Self::LocalAddress => "Local, private and reserved addresses",
+            Self::MinifiedCode => "Minified code, too dense to review by eye",
+            Self::CollapsedInReview => "Files marked to be collapsed or skipped in code review",
             Self::KnownVulnerable => "Dependencies with known security bugs",
             Self::NotRead => "Not checked: Airlock could not read these",
             Self::DependencyNotChecked => "Dependencies not checked for known malware",
             Self::OpaqueFile => "Files Airlock cannot read inside",
+            Self::VendoredPackages => {
+                "Installed packages committed to the repository, which skip package checks"
+            }
+            Self::Submodule => "Submodules: other repositories this one pulls in, not scanned",
+            Self::LinkOutside => "Links pointing outside the repository",
+            Self::LongCodeLine => "Very long lines of code in files that are hard to review",
+            Self::EncodedBlob => "Long blocks of encoded data inside code",
+            Self::HiddenData => "Extra data hidden inside a media file",
+            Self::UnusualCharacters => "Characters that can hide text, in tests or terminal output",
+            Self::RunsOnBuild => "Runs when you build, test or start this project",
             Self::AutoRun => "Runs automatically when installed or opened",
+            Self::AiInstructions => "Instructions that AI coding tools will read and may follow",
+            Self::ContainerAccess => "Containers given access to your computer",
             Self::IpAddress => "Raw IP addresses, some may be version numbers",
             Self::NetworkCall => "Contacts these addresses",
             Self::CallWithoutAddress => "Connects somewhere Airlock cannot see",
+            Self::RiskyHost => "Services often used to host malware or receive stolen data",
+            Self::HiddenAddress => "Addresses or commands stored in encoded text",
+            Self::LookalikeLetters => "Names using look-alike letters from another alphabet",
+            Self::LookalikePackage => "Package names that look like popular packages",
+            Self::UnusualPackageSource => "Packages from outside the normal registry, not checked",
             Self::HadMaliciousReleases => {
                 "Package has had malicious releases, check which version gets installed"
             }
-            Self::DisguisedFile => "Program or archive disguised as another type of file",
+            Self::WatchesUser => "Watches the keyboard, screen or clipboard",
+            Self::ChecksForAnalysis => "Checks whether it is being watched or analyzed",
+            Self::InjectsCode => "Injects code into other programs",
+            Self::WeakensSecurity => "Weakens a security protection",
+            Self::CoversTracks => "Deletes itself or its traces",
+            Self::HidesItsWindow => "Starts programs hidden from view",
+            Self::StaysOnComputer => "Sets itself up to run again later",
+            Self::ReadsSecrets => "Reads passwords, keys or other secrets",
+            Self::DisguisedFile => "Program, archive or script disguised as another type of file",
+            Self::InvisibleText => "Invisible characters that change what the text says",
+            Self::ObfuscatedCode => "Code disguised so people cannot read it",
+            Self::OffScreenCode => "Code hidden off the edge of the screen",
+            Self::HiddenCode => "Code or commands hidden inside encoded text",
             Self::HidesConnection => "Hides where it connects to",
             Self::RunsHiddenCode => "Decodes hidden code and runs it",
-            Self::AutoRunNetwork => "Contacts the internet automatically when installed or opened",
+            Self::CallsRawIp => "Contacts a raw IP address, which hides who is behind it",
+            Self::UnsafePackageSource => "Installs packages from an unsafe address",
+            Self::DestroysFiles => "Can destroy your files",
+            Self::DisablesSecurity => "Turns off security protections",
+            Self::ActsInSecret => "Contacts the internet while covering what it does",
+            Self::CryptoMiner => "Mines cryptocurrency using your computer",
+            Self::RemoteControl => "Gives someone remote control of your computer",
+            Self::StealsSecrets => "Collects passwords, keys or wallets and contacts the internet",
+            Self::AutoRunHidden => "Runs automatically, and its code is disguised",
+            Self::AutoRunNetwork => {
+                "Contacts the internet automatically when installed, opened or built"
+            }
             Self::DownloadsAndRuns => "Downloads code from the internet and runs it",
             Self::KnownMalicious => "Known malicious package",
         }
@@ -139,6 +257,8 @@ impl Kind {
                 | Self::LocalAddress
                 | Self::IpAddress
                 | Self::NetworkCall
+                | Self::RiskyHost
+                | Self::CallsRawIp
                 | Self::AutoRunNetwork
         )
     }
@@ -325,6 +445,7 @@ struct Entry {
 pub struct Report {
     entries: BTreeMap<Key, Entry>,
     calls: BTreeMap<String, Vec<Call>>,
+    disguised: BTreeSet<String>,
     retained_bytes: usize,
     budget_bytes: usize,
     not_listed: u64,
@@ -339,6 +460,7 @@ impl Report {
         Self {
             entries: BTreeMap::new(),
             calls: BTreeMap::new(),
+            disguised: BTreeSet::new(),
             retained_bytes: 0,
             budget_bytes,
             not_listed: 0,
@@ -409,8 +531,27 @@ impl Report {
         }
     }
 
+    pub fn has_calls(&self, path: &str) -> bool {
+        self.calls.contains_key(path)
+    }
+
     pub fn calls_in(&self, path: &str) -> Vec<Call> {
         self.calls.get(path).cloned().unwrap_or_default()
+    }
+
+    /// Remembers that a person can't read this file's code, for checks that run
+    /// after every file has been read.
+    pub fn mark_disguised(&mut self, path: &str) {
+        let bytes = path.len() + ENTRY_OVERHEAD_BYTES;
+        if self.retained_bytes + bytes <= self.budget_bytes
+            && self.disguised.insert(path.to_string())
+        {
+            self.retained_bytes += bytes;
+        }
+    }
+
+    pub fn is_disguised(&self, path: &str) -> bool {
+        self.disguised.contains(path)
     }
 
     pub fn has_findings(&self) -> bool {
@@ -734,23 +875,61 @@ impl Report {
 mod tests {
     use super::*;
 
-    const ALL_KINDS: [Kind; 19] = [
+    const ALL_KINDS: [Kind; 57] = [
         Kind::DocumentationAddress,
         Kind::LockfileAddress,
         Kind::MentionedAddress,
         Kind::LocalAddress,
+        Kind::MinifiedCode,
+        Kind::CollapsedInReview,
         Kind::KnownVulnerable,
         Kind::NotRead,
         Kind::DependencyNotChecked,
         Kind::OpaqueFile,
+        Kind::VendoredPackages,
+        Kind::Submodule,
+        Kind::LinkOutside,
+        Kind::LongCodeLine,
+        Kind::EncodedBlob,
+        Kind::HiddenData,
+        Kind::UnusualCharacters,
+        Kind::RunsOnBuild,
         Kind::AutoRun,
+        Kind::AiInstructions,
+        Kind::ContainerAccess,
         Kind::IpAddress,
         Kind::NetworkCall,
         Kind::CallWithoutAddress,
+        Kind::RiskyHost,
+        Kind::HiddenAddress,
+        Kind::LookalikeLetters,
+        Kind::LookalikePackage,
+        Kind::UnusualPackageSource,
         Kind::HadMaliciousReleases,
+        Kind::WatchesUser,
+        Kind::ChecksForAnalysis,
+        Kind::InjectsCode,
+        Kind::WeakensSecurity,
+        Kind::CoversTracks,
+        Kind::HidesItsWindow,
+        Kind::StaysOnComputer,
+        Kind::ReadsSecrets,
         Kind::DisguisedFile,
+        Kind::InvisibleText,
+        Kind::ObfuscatedCode,
+        Kind::OffScreenCode,
+        Kind::HiddenCode,
         Kind::HidesConnection,
         Kind::RunsHiddenCode,
+        Kind::CallsRawIp,
+        Kind::UnsafePackageSource,
+        Kind::DestroysFiles,
+        Kind::DisablesSecurity,
+        Kind::ActsInSecret,
+        Kind::CryptoMiner,
+        Kind::RemoteControl,
+        Kind::StealsSecrets,
+        Kind::AutoRunHidden,
         Kind::AutoRunNetwork,
         Kind::DownloadsAndRuns,
         Kind::KnownMalicious,
