@@ -35,7 +35,7 @@ const MAX_SNIPPET_BYTES: usize = 160;
 
 /// Fingerprints left by obfuscators, each with a description for the report.
 /// None of these appear in code that people write or that minifiers produce.
-const FINGERPRINTS: [(&str, &str); 12] = [
+const FINGERPRINTS: [(&str, &str); 9] = [
     (
         r#"(?i-u)\[['"]push['"]\]\s*\(\s*[\w$]+\[['"]shift['"]\]"#,
         "rotates a hidden table of strings, which javascript-obfuscator does",
@@ -69,13 +69,14 @@ const FINGERPRINTS: [(&str, &str); 12] = [
         "builds the word debugger to stop people inspecting it",
     ),
     (
-        r#"(?-u)\brequire\s*\(\s*['"`][\w:-]{1,14}['"`]\s*\+\s*['"`]"#,
-        "builds a module's name out of pieces so a search can't find it",
-    ),
-    (
         r#"(?-u)\[\s*['"](?:ev|eva|e)['"]\s*\+\s*['"](?:al|l|val)['"]\s*\]"#,
         "builds the word eval out of pieces so a search can't find it",
     ),
+];
+
+/// Ways around anything watching normal calls. Test suites for runtimes use these
+/// honestly, so in tests they're listed as a warning.
+const ROUTES_AROUND: [(&str, &str); 2] = [
     (
         r#"(?-u)\bprocess\.binding\s*\(\s*['"](?:spawn_sync|process_wrap|tcp_wrap|pipe_wrap)['"]|\bprocess\.mainModule\.require\b|\bmodule\.constructor\._load\b"#,
         "reaches into Node's internals, a way around anything watching normal calls",
@@ -85,6 +86,32 @@ const FINGERPRINTS: [(&str, &str); 12] = [
         "reaches into Python's built-ins, a way to hide a call to eval or exec",
     ),
 ];
+/// Node's own modules that can't run anything, reach the network or read files, so
+/// building one of these names out of pieces can't be hiding much. Anything else
+/// built this way counts, including packages Airlock has never heard of.
+const HARMLESS_MODULES: [&str; 7] = [
+    "url",
+    "path",
+    "util",
+    "events",
+    "assert",
+    "querystring",
+    "string_decoder",
+];
+
+static COMPILED_ROUTES_AROUND: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    ROUTES_AROUND
+        .iter()
+        .map(|(pattern, what)| (compile(pattern), *what))
+        .collect()
+});
+/// `require('child_' + 'process')`, and whether more follows after the last piece.
+static MODULE_IN_PIECES: LazyLock<Regex> = LazyLock::new(|| {
+    compile(
+        r#"(?-u)\b(?:require|import)\s*\(\s*((?:['"`][\w:./-]{0,30}['"`]\s*\+\s*)+['"`][\w:./-]{0,30}['"`])\s*(\+)?"#,
+    )
+});
+static QUOTED_PIECE: LazyLock<Regex> = LazyLock::new(|| compile(r#"(?-u)['"`]([\w:./-]*)['"`]"#));
 
 static COMPILED_FINGERPRINTS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     FINGERPRINTS
@@ -253,6 +280,54 @@ fn scan_fingerprints(file: &RepoFile, report: &mut Report) {
         if let Some(found) = pattern.find(contents) {
             let line = line_at(contents, found.start());
             add_disguised(file, Kind::ObfuscatedCode, what, line, report);
+        }
+    }
+    for (pattern, what) in COMPILED_ROUTES_AROUND.iter() {
+        if let Some(found) = pattern.find(contents) {
+            let line = line_at(contents, found.start());
+            if is_test_path(file.path.raw()) {
+                let at = Some(At {
+                    path: &file.path,
+                    line: Some(line),
+                });
+                report.add(Kind::InternalsInTests, "", what, at);
+            } else {
+                add_disguised(file, Kind::ObfuscatedCode, what, line, report);
+            }
+        }
+    }
+    scan_modules_in_pieces(file, report);
+}
+
+/// Puts a split-up module name back together to see what it really is.
+fn scan_modules_in_pieces(file: &RepoFile, report: &mut Report) {
+    let contents = file.contents.as_slice();
+
+    for captures in MODULE_IN_PIECES.captures_iter(contents) {
+        let Some(pieces) = captures.get(1) else {
+            continue;
+        };
+        let name: Vec<u8> = QUOTED_PIECE
+            .captures_iter(pieces.as_bytes())
+            .filter_map(|piece| piece.get(1))
+            .flat_map(|piece| piece.as_bytes().iter().copied())
+            .collect();
+        let name = name.strip_prefix(b"node:").unwrap_or(&name);
+
+        // A path to the project's own file, as in `require('./locale/' + 'en')`.
+        let is_local_file = matches!(name.first(), Some(b'.' | b'/'));
+        // With more to come, the final name can't be known.
+        let is_complete = captures.get(2).is_none();
+        let is_harmless = is_complete
+            && HARMLESS_MODULES
+                .iter()
+                .any(|module| module.as_bytes() == name);
+
+        if !is_local_file && !is_harmless {
+            let what = "builds a module's name out of pieces so a search can't find it";
+            let line = line_at(contents, pieces.start());
+            add_disguised(file, Kind::ObfuscatedCode, what, line, report);
+            return;
         }
     }
 }
@@ -723,6 +798,54 @@ mod tests {
             let report = scan_text("a.js", text.as_bytes());
 
             assert_eq!(count(&report, Kind::ObfuscatedCode), 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn module_names_in_pieces_are_read_before_judging_them() {
+        for text in [
+            "require('chi' + 'ld_pro' + 'cess')",
+            "require('node:' + 'child_process')",
+            "require(`child_` + `process`)",
+            "import('child_' + 'process')",
+            "require('f' + 's')",
+            "require('ax' + 'ios')",
+            // A package nobody has heard of could be anything.
+            "require('some-pack' + 'age')",
+            // The rest of the name could be anything too.
+            "require('u' + 'rl' + suffix)",
+            "require('chi' + 'ld_' + rest)",
+        ] {
+            let report = scan_text("a.js", text.as_bytes());
+
+            assert_eq!(count(&report, Kind::ObfuscatedCode), 1, "{text}");
+        }
+        for text in [
+            "require('u' + 'rl').pathToFileURL(p).href",
+            "require('node:' + 'url')",
+            "require('pa' + 'th')",
+            "require('./locale/' + 'en')",
+            "require('./locale/' + 'en' + name)",
+        ] {
+            let report = scan_text("a.js", text.as_bytes());
+
+            assert_eq!(count(&report, Kind::ObfuscatedCode), 0, "{text}");
+        }
+    }
+
+    #[test]
+    fn reaching_into_internals_is_only_a_warning_in_tests() {
+        for text in [
+            "process.binding('tcp_wrap')",
+            "process.mainModule.require('fs')",
+        ] {
+            let test = scan_text("tests/unit/a.ts", text.as_bytes());
+            assert_eq!(count(&test, Kind::InternalsInTests), 1, "{text}");
+            assert_eq!(count(&test, Kind::ObfuscatedCode), 0, "{text}");
+
+            let code = scan_text("src/a.ts", text.as_bytes());
+            assert_eq!(count(&code, Kind::ObfuscatedCode), 1, "{text}");
+            assert_eq!(count(&code, Kind::InternalsInTests), 0, "{text}");
         }
     }
 

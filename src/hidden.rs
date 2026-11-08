@@ -11,7 +11,7 @@
 use crate::git::RepoFile;
 use crate::network::{
     Call, DECODE, FileClass, LineCounter, URL, classify, clean_url, host_of, is_binary, is_local,
-    is_script, is_test_path,
+    is_reserved_host, is_script, is_test_path,
 };
 use crate::opaque::{Packed, identify};
 use crate::report::{At, Kind, Report};
@@ -116,13 +116,6 @@ const HARMLESS_HOSTS: [&str; 8] = [
     "schemas.xmlsoap.org",
     "schemas.microsoft.com",
     "schemas.openxmlformats.org",
-];
-const HARMLESS_HOST_ENDINGS: [&str; 5] = [
-    "example.com",
-    "example.org",
-    ".example",
-    ".invalid",
-    ".test",
 ];
 /// A `data:` link of these types is just media, or a source map.
 const MEDIA_DATA_TYPES: [&str; 10] = [
@@ -493,9 +486,7 @@ fn is_harmless_host(host: &str) -> bool {
     !host.contains('.')
         || is_local(host)
         || HARMLESS_HOSTS.contains(&host)
-        || HARMLESS_HOST_ENDINGS
-            .iter()
-            .any(|ending| host.ends_with(ending))
+        || is_reserved_host(host)
 }
 
 /// Whether encoded text sits in a link like `data:image/png;base64,` that's
@@ -1076,6 +1067,17 @@ mod tests {
         assert_eq!(
             listed(&report, Kind::HiddenAddress),
             ["https://login.acme.net/"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_only_ends_like_a_reserved_one_is_not_let_off() {
+        let url = "https://evilexample.com/stage2";
+        let text = format!("atob('{}')", encode(url.as_bytes()));
+
+        assert_eq!(
+            listed(&scan_text("a.js", &text), Kind::HidesConnection),
+            [url]
         );
     }
 
