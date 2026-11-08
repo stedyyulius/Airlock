@@ -326,7 +326,15 @@ fn scan_modules_in_pieces(file: &RepoFile, report: &mut Report) {
         if !is_local_file && !is_harmless {
             let what = "builds a module's name out of pieces so a search can't find it";
             let line = line_at(contents, pieces.start());
-            add_disguised(file, Kind::ObfuscatedCode, what, line, report);
+            if is_test_path(file.path.raw()) {
+                let at = Some(At {
+                    path: &file.path,
+                    line: Some(line),
+                });
+                report.add(Kind::InternalsInTests, "", what, at);
+            } else {
+                add_disguised(file, Kind::ObfuscatedCode, what, line, report);
+            }
             return;
         }
     }
@@ -831,6 +839,15 @@ mod tests {
 
             assert_eq!(count(&report, Kind::ObfuscatedCode), 0, "{text}");
         }
+    }
+
+    #[test]
+    fn a_module_name_in_pieces_is_only_a_warning_in_tests() {
+        let text = b"await import('some-' + 'module')";
+        let report = scan_text("tests/specs/run/a.out", text);
+
+        assert_eq!(count(&report, Kind::InternalsInTests), 1);
+        assert_eq!(count(&report, Kind::ObfuscatedCode), 0);
     }
 
     #[test]

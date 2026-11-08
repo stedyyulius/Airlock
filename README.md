@@ -154,7 +154,7 @@ How far to trust this:
 - **Airlock was tuned on this collection.** Its checks were improved after missing
   two of these projects, so expect it to do less well on malware it hasn't seen.
 
-It was also run on 46 widely used open source projects to look for false alarms. 30
+It was also run on 46 widely used open source projects to look for false alarms. 32
 got no DANGER. Most of the others really do what's flagged, such as piping a download
 into a shell, or use a package listed as malicious, and a few are still false alarms.
 

