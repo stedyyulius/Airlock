@@ -15,6 +15,7 @@ mod refs;
 mod report;
 mod saved;
 mod source;
+mod tactics;
 mod text;
 
 use autorun::AutoRun;
@@ -85,7 +86,8 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
             opaque::scan(&file, &mut report);
             obfuscation::scan(&file, &mut report);
             hidden::scan(&file, &mut report);
-                autorun.scan(&file);
+            tactics::scan(&file, &mut report);
+            autorun.scan(&file);
             dependencies.scan(&file, &mut report);
             },
     )?;
