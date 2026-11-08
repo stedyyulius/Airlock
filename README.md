@@ -2,11 +2,13 @@
 
 Check a repository for malicious code before it reaches your machine.
 
-Paste a URL, and Airlock reads the repository in memory without installing or
-running anything.
+Paste a URL, and Airlock reads the repository in memory and lists what it finds,
+so you can decide. It never clones the repository, saves it to your disk, or
+runs any of its code.
 
-> **Status: early development.** Airlock does not scan anything yet. Do not rely
-> on it to decide whether code is safe.
+> **Status: early development.** Airlock lists the network addresses and
+> unreadable files it finds, but gives no safety verdict yet. Do not rely on it
+> to decide whether code is safe.
 
 ## Usage
 
