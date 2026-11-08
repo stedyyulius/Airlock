@@ -487,6 +487,17 @@ impl Report {
             *retained_bytes += key_bytes;
             Entry::default()
         });
+
+        // Two checks can find the same thing in the same place.
+        let already_there = at.is_some_and(|at| {
+            entry
+                .locations
+                .iter()
+                .any(|(path, line)| path == at.path && *line == at.line)
+        });
+        if already_there {
+            return;
+        }
         entry.count += 1;
 
         if let Some(at) = at {
@@ -1019,6 +1030,20 @@ mod tests {
         assert_eq!(
             report.listed(Kind::NetworkCall),
             [("https://a.example".to_string(), 8)]
+        );
+    }
+
+    #[test]
+    fn the_same_place_is_only_named_once() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::DownloadsAndRuns, "", "eval(x)", at(&file, 3));
+        report.add(Kind::DownloadsAndRuns, "", "eval(x)", at(&file, 3));
+        report.add(Kind::DownloadsAndRuns, "", "eval(x)", at(&file, 9));
+
+        assert_eq!(
+            report.listed(Kind::DownloadsAndRuns),
+            [("eval(x)".to_string(), 2)]
         );
     }
 

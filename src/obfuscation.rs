@@ -462,7 +462,9 @@ fn scan_invisible_text(file: &RepoFile, report: &mut Report) {
 
     // Right-to-left text and translations use these honestly, but code has no need.
     if is_code {
-        let kind = if is_test_path(path) {
+        // Bundled libraries handle text in every language, and nobody reviews them
+        // line by line anyway, so there's nothing for these to fool.
+        let kind = if is_usual_place_for_minified_code(path) {
             Kind::UnusualCharacters
         } else {
             Kind::InvisibleText
@@ -960,6 +962,20 @@ mod tests {
     fn tests_of_these_characters_only_get_a_warning() {
         for path in ["tests/rtlo.rs", "testdata/Rtlo.sol", "a_test.go"] {
             let report = scan_text(path, "/*\u{202e} } \u{2066} */\n".as_bytes());
+
+            assert_eq!(count(&report, Kind::UnusualCharacters), 1, "{path}");
+            assert_eq!(count(&report, Kind::InvisibleText), 0, "{path}");
+        }
+    }
+
+    #[test]
+    fn bundled_libraries_only_get_a_warning_for_these_characters() {
+        for path in [
+            "public/charting_library/a.js",
+            "dist/app.js",
+            "vendor/a.min.js",
+        ] {
+            let report = scan_text(path, "a = 'x\u{202b}y\u{202c}z';\n".as_bytes());
 
             assert_eq!(count(&report, Kind::UnusualCharacters), 1, "{path}");
             assert_eq!(count(&report, Kind::InvisibleText), 0, "{path}");
