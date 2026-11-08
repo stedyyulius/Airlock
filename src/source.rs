@@ -15,16 +15,24 @@ pub enum Source {
 /// Why a pasted URL was rejected.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SourceError {
-    UnsupportedScheme(String),
+    UnsupportedScheme,
+    CredentialsInUrl,
     UnsupportedHost(String),
     InvalidPath(String),
     InvalidName(String),
 }
 
+// The first two variants carry no text on purpose: the URL they reject may
+// contain a password or access token, and error messages end up in logs.
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedScheme(url) => write!(f, "only https URLs are supported: {url}"),
+            Self::UnsupportedScheme => write!(f, "only https URLs are supported"),
+            Self::CredentialsInUrl => write!(
+                f,
+                "URLs with a username, password or token are not supported, \
+                 use https://host/owner/repo"
+            ),
             Self::UnsupportedHost(host) => write!(f, "unsupported host: {host}"),
             Self::InvalidPath(path) => {
                 write!(f, "expected a path like owner/repo, got: {path}")
@@ -42,7 +50,7 @@ impl Source {
         let trimmed = input.trim();
         let without_scheme = trimmed.strip_prefix("https://").unwrap_or(trimmed);
         if without_scheme.contains("://") {
-            return Err(SourceError::UnsupportedScheme(trimmed.to_string()));
+            return Err(SourceError::UnsupportedScheme);
         }
 
         // Drop any ?query or #fragment: they don't identify the repo.
@@ -50,13 +58,14 @@ impl Source {
             .find(['?', '#'])
             .unwrap_or(without_scheme.len());
         let location = &without_scheme[..end];
+        let (host, path) = location.split_once('/').unwrap_or((location, ""));
 
-        let (host, path) = location
-            .split_once('/')
-            .ok_or_else(|| SourceError::InvalidPath(location.to_string()))?;
+        if host.contains('@') {
+            return Err(SourceError::CredentialsInUrl);
+        }
 
         // The host must match exactly, so lookalikes such as
-        // github.com.evil.com and github.com@evil.com are rejected.
+        // github.com.evil.com are rejected.
         match host.to_ascii_lowercase().as_str() {
             "github.com" | "www.github.com" => {
                 let (owner, repo) = parse_owner_repo(path)?;
@@ -148,13 +157,33 @@ mod tests {
     fn rejects_hosts_that_only_look_like_github() {
         for url in [
             "https://github.com.evil.com/owner/repo",
-            "https://github.com@evil.com/owner/repo",
             "https://evilgithub.com/owner/repo",
             "https://gitlab.com/owner/repo",
+            // The first letter is a Cyrillic look-alike.
+            "https://\u{0261}ithub.com/owner/repo",
         ] {
             assert!(
                 matches!(Source::parse(url), Err(SourceError::UnsupportedHost(_))),
                 "input: {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_credentials_without_repeating_them() {
+        for url in [
+            "https://user:ghp_secret@github.com/owner/repo",
+            "https://ghp_secret@github.com/owner/repo",
+            "https://ghp_secret@github.com",
+            "https://github.com@ghp_secret.example/owner/repo",
+            "http://user:ghp_secret@github.com/owner/repo",
+            "ghp_secret@github.com:owner/repo.git",
+        ] {
+            let error = Source::parse(url).unwrap_err();
+
+            assert!(
+                !error.to_string().contains("ghp_secret"),
+                "input: {url:?}, error: {error}"
             );
         }
     }
@@ -167,7 +196,7 @@ mod tests {
             "file:///etc/passwd",
         ] {
             assert!(
-                matches!(Source::parse(url), Err(SourceError::UnsupportedScheme(_))),
+                matches!(Source::parse(url), Err(SourceError::UnsupportedScheme)),
                 "input: {url:?}"
             );
         }
