@@ -11,37 +11,42 @@ mod source;
 mod text;
 
 use archive::{Limits, read_archive};
-use report::{Kind, Report};
+use report::{Kind, PLAIN, Palette, Report, ScanInfo};
 use source::Target;
 use std::error::Error;
-use std::fmt::Write;
 use std::process::ExitCode;
 use text::escape;
 
-// Exit code 0 will mean a completed scan with no findings, and 1 will mean
-// findings. Everything else means no verdict. Nothing may exit 0 until checks
-// exist: `airlock scan <url> && npm install` must not carry on after a run that
-// checked nothing.
-const EXIT_NO_VERDICT: u8 = 2;
+// Exit code 0 means a completed scan with nothing to report, and even that isn't
+// proof of safety. 1 means there are findings to review, and 2 means no result.
+// `airlock scan <url> && npm install` therefore stops at any finding.
+const EXIT_FINDINGS: u8 = 1;
+const EXIT_NO_RESULT: u8 = 2;
 const USAGE: &str = "usage: airlock scan <repository-url>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.as_slice() {
-        [command, url] if command == "scan" => {
-            if let Err(error) = scan(url) {
+        [command, url] if command == "scan" => match scan(url) {
+            Ok(false) => ExitCode::SUCCESS,
+            Ok(true) => ExitCode::from(EXIT_FINDINGS),
+            Err(error) => {
                 // Library errors can quote bytes from the archive, such as file
                 // names, so all error text is escaped here.
                 eprintln!("error: {}", escape(&error.to_string()));
+                ExitCode::from(EXIT_NO_RESULT)
             }
+        },
+        _ => {
+            eprintln!("{USAGE}");
+            ExitCode::from(EXIT_NO_RESULT)
         }
-        _ => eprintln!("{USAGE}"),
     }
-    ExitCode::from(EXIT_NO_VERDICT)
 }
 
-fn scan(url: &str) -> Result<(), Box<dyn Error>> {
+/// Runs a scan and returns whether it found anything to report.
+fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
     let target = Target::parse(url)?;
     let source = &target.source;
 
@@ -88,8 +93,11 @@ fn scan(url: &str) -> Result<(), Box<dyn Error>> {
     for skipped in &summary.skipped {
         if is_in_folder(skipped.path.raw(), folder) {
             not_read += 1;
-            let subject = format!("{}: {}", skipped.path.raw(), skipped.reason);
-            report.add(Kind::NotRead, "", &subject, None);
+            report.add_detail(
+                Kind::NotRead,
+                skipped.path.raw(),
+                &skipped.reason.to_string(),
+            );
         }
     }
     report.note_not_listed(summary.skipped_total - summary.skipped.len() as u64);
@@ -100,26 +108,23 @@ fn scan(url: &str) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let mut results = String::new();
-    if let Some(commit) = &summary.commit {
-        writeln!(results, "commit: {commit}")?;
-    }
-    if let Some(resolved) = &resolved {
-        writeln!(
-            results,
-            "{}: {}",
-            resolved.reference_kind,
-            escape(&resolved.reference)
-        )?;
-    }
-    if let Some(folder) = folder {
-        writeln!(results, "path: {}", escape(folder))?;
-    }
-    writeln!(results, "read {files} files ({bytes} bytes)")?;
-    write!(results, "{report}")?;
-    print!("{results}");
+    let name = source.name();
+    let info = ScanInfo {
+        name: &name,
+        commit: summary.commit.as_deref(),
+        reference: resolved
+            .as_ref()
+            .filter(|found| found.reference_kind != "commit")
+            .map(|found| (found.reference_kind, found.reference.as_str())),
+        path: folder,
+        files,
+        bytes,
+        packages_checked: 0,
+    };
 
-    match saved::save(&format!("scanned {archive_url}\n{results}")) {
+    print!("\n{}", report.render(&info, Palette::for_terminal()));
+
+    match saved::save(&report.render(&info, &PLAIN)) {
         Ok(path) => {
             println!(
                 "\nAirlock keeps one report file and each scan replaces it, \
@@ -133,7 +138,7 @@ fn scan(url: &str) -> Result<(), Box<dyn Error>> {
             escape(&error.to_string())
         ),
     }
-    Ok(())
+    Ok(report.has_findings())
 }
 
 fn is_in_folder(path: &str, folder: Option<&str>) -> bool {

