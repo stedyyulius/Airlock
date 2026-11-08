@@ -23,6 +23,27 @@ const MAX_NAME_BYTES: usize = 300;
 const MAX_IDS_SHOWN: usize = 3;
 const MAX_VERSIONS_SHOWN: usize = 6;
 const MAX_ADVISORIES_READ: usize = 4000;
+/// npm replaces packages it removes, often malware, with an empty one of this
+/// version. It holds no code, but anything depending on one is worth a look.
+const PLACEHOLDER_NOTE: &str =
+    "npm's empty placeholder for a removed package, so probably harmless, but check why it's here";
+/// Dependencies written like these don't come from the registry, so looking them
+/// up by name would find a stranger's package that happens to share the name.
+const NOT_FROM_REGISTRY: [&str; 13] = [
+    "file:",
+    "link:",
+    "workspace:",
+    "portal:",
+    "http:",
+    "https:",
+    "git+",
+    "git:",
+    "git@",
+    "ssh:",
+    "github:",
+    "gitlab:",
+    "bitbucket:",
+];
 const NPM_DEPENDENCY_FIELDS: [&str; 4] = [
     "dependencies",
     "devDependencies",
@@ -288,7 +309,17 @@ fn classify_package(
 
     if package.version.is_some() {
         if !malware.is_empty() {
-            let subject = format!("{}: {}", package.describe(), join(&malware));
+            let is_placeholder = package.ecosystem == "npm"
+                && package
+                    .version
+                    .as_deref()
+                    .is_some_and(|version| version.ends_with("-security"));
+            let note = if is_placeholder {
+                format!(", {PLACEHOLDER_NOTE}")
+            } else {
+                String::new()
+            };
+            let subject = format!("{}: {}{note}", package.describe(), join(&malware));
             return Some((Kind::KnownMalicious, subject));
         }
         if ids.is_empty() {
@@ -399,6 +430,12 @@ fn key_lines(text: &str) -> HashMap<&str, u64> {
 /// what would be installed.
 fn exact_version(spec: &str) -> Option<String> {
     let spec = spec.trim();
+    // Removed packages only ever have this one version, so a range still means it.
+    let spec = if spec.ends_with("-security") {
+        spec.trim_start_matches(['^', '~'])
+    } else {
+        spec
+    };
     let spec = spec.strip_prefix('=').unwrap_or(spec);
     let spec = spec.strip_prefix('v').unwrap_or(spec);
 
@@ -414,6 +451,19 @@ fn exact_version(spec: &str) -> Option<String> {
 fn split_name_and_version(text: &str) -> Option<(&str, &str)> {
     let at = text.get(1..)?.rfind('@')? + 1;
     Some((&text[..at], &text[at + 1..]))
+}
+
+/// Whether a dependency written this way comes from the registry. Anything else
+/// gets reported by the check for unusual package sources.
+fn is_from_registry(spec: &str) -> bool {
+    let spec = spec.trim();
+    let is_github_shorthand =
+        spec.contains('/') && !spec.starts_with(['@', '.', '/', '~']) && !spec.contains(':');
+
+    !is_github_shorthand
+        && !NOT_FROM_REGISTRY
+            .iter()
+            .any(|prefix| spec.starts_with(prefix))
 }
 
 /// Handles npm aliases, where `"nice-name": "npm:real-package@1.0.0"` really
@@ -447,7 +497,9 @@ fn parse_npm_lock(text: &str) -> Result<Vec<Entry>, String> {
             }
             let name = package.get("name").and_then(Value::as_str).unwrap_or(name);
             let version = package.get("version").and_then(Value::as_str).unwrap_or("");
-            entries.push(npm_entry(name, version, lines.get(key.as_str()).copied()));
+            if is_from_registry(version) {
+                entries.push(npm_entry(name, version, lines.get(key.as_str()).copied()));
+            }
         }
     }
     if let Some(dependencies) = root.get("dependencies").and_then(Value::as_object) {
@@ -465,7 +517,9 @@ fn collect_old_npm_lock(
 ) {
     for (name, package) in dependencies {
         let version = package.get("version").and_then(Value::as_str).unwrap_or("");
-        entries.push(npm_entry(name, version, lines.get(name.as_str()).copied()));
+        if is_from_registry(version) {
+            entries.push(npm_entry(name, version, lines.get(name.as_str()).copied()));
+        }
 
         if let Some(nested) = package.get("dependencies").and_then(Value::as_object) {
             collect_old_npm_lock(nested, lines, entries);
@@ -484,7 +538,9 @@ fn parse_package_json(text: &str) -> Result<Vec<Entry>, String> {
         };
         for (name, spec) in dependencies {
             let spec = spec.as_str().unwrap_or("");
-            entries.push(npm_entry(name, spec, lines.get(name.as_str()).copied()));
+            if is_from_registry(spec) {
+                entries.push(npm_entry(name, spec, lines.get(name.as_str()).copied()));
+            }
         }
     }
     Ok(entries)
@@ -529,8 +585,8 @@ fn yarn_package_name(header: &str) -> Option<String> {
     if first.starts_with("__metadata") {
         return None;
     }
-    let (name, _) = split_name_and_version(first)?;
-    Some(name.to_string())
+    let (name, version) = split_name_and_version(first)?;
+    is_from_registry(version.strip_prefix("npm:").unwrap_or(version)).then(|| name.to_string())
 }
 
 fn parse_pnpm_lock(text: &str) -> Result<Vec<Entry>, String> {
@@ -907,7 +963,6 @@ mod tests {
             [
                 pinned("a", "1.0.0"),
                 pinned("b", "2.0.0"),
-                unpinned("c"),
                 pinned("real", "4.0.0"),
             ]
         );
@@ -933,11 +988,63 @@ mod tests {
                 unpinned("b"),
                 pinned("d", "3.0.0"),
                 unpinned("e"),
-                unpinned("f"),
                 unpinned("g"),
                 pinned("real", "2.0.0"),
             ]
         );
+    }
+
+    #[test]
+    fn dependencies_that_do_not_come_from_the_registry_are_not_looked_up_by_name() {
+        let text = r#"{"dependencies":{
+            "a":"file:../a",
+            "b":"workspace:*",
+            "c":"link:./c",
+            "d":"github:acme/d",
+            "e":"acme/e",
+            "f":"https://acme.net/f.tgz",
+            "g":"git+ssh://git@acme.net/g.git",
+            "h":"^1.0.0",
+            "i":"@scope/i@1.0.0"
+        }}"#;
+
+        assert_eq!(
+            summarize(&parse_package_json(text).unwrap()),
+            [unpinned("h"), unpinned("i")]
+        );
+    }
+
+    #[test]
+    fn local_packages_in_a_yarn_lockfile_are_not_looked_up_by_name() {
+        let text = r#""eslint-plugin-react-internal@link:./scripts/eslint-rules":
+  version "0.0.0"
+
+"local@workspace:packages/local":
+  version: 0.0.0
+
+"real@npm:^1.0.0":
+  version: 1.0.0
+"#;
+
+        assert_eq!(
+            summarize(&parse_yarn_lock(text).unwrap()),
+            [pinned("real", "1.0.0")]
+        );
+    }
+
+    #[test]
+    fn a_removed_packages_placeholder_counts_as_its_exact_version_with_a_note() {
+        let package = Package {
+            ecosystem: "npm",
+            name: "fs".to_string(),
+            version: exact_version("^0.0.1-security"),
+        };
+        let ids = vec!["MAL-2025-21003".to_string()];
+
+        let (kind, subject) = classify_package(&package, &ids, &HashMap::new()).unwrap();
+
+        assert_eq!(kind, Kind::KnownMalicious);
+        assert!(subject.starts_with("fs 0.0.1-security (npm): MAL-2025-21003, npm's empty"));
     }
 
     #[test]

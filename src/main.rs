@@ -7,10 +7,12 @@ mod fetch;
 mod git;
 mod hidden;
 mod links;
+mod lookalike;
 mod network;
 mod obfuscation;
 mod opaque;
 mod osv;
+mod pkgsource;
 mod refs;
 mod report;
 mod saved;
@@ -89,7 +91,8 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
             tactics::scan(&file, &mut report);
             autorun.scan(&file, &mut report);
             dependencies.scan(&file, &mut report);
-            },
+            pkgsource::scan(&file, &mut report);
+        },
     )?;
 
     for skipped in &summary.skipped {
