@@ -35,6 +35,17 @@ Airlock scans public repositories on these three sites. Private repositories and
 self-hosted servers are not supported yet. A link to a branch or folder scans only
 that branch or folder.
 
+Or, if you have Docker, build an image and you don't need Rust at all:
+
+```sh
+docker build -t airlock https://github.com/stedyyulius/Airlock.git
+docker run --rm -t --read-only --cap-drop=ALL airlock scan https://github.com/owner/repo
+```
+
+The image holds only the Airlock program, with no shell or other tools. It doesn't
+save a copy of the report, so to keep one, leave out `-t` and add
+`> report.txt` to the end of the command.
+
 The report prints in your terminal, and the last line shows where to find a copy
 in a file, `~/.airlock/report.txt`. Each scan replaces that file, so copy it if
 you want to keep it. It holds only Airlock's report, never the repository's files.

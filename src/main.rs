@@ -34,6 +34,7 @@ use text::escape;
 // `airlock scan <url> && npm install` therefore stops at any finding.
 const EXIT_FINDINGS: u8 = 1;
 const EXIT_NO_RESULT: u8 = 2;
+const NO_SAVE_VARIABLE: &str = "AIRLOCK_NO_SAVE";
 const USAGE: &str = "usage: airlock scan <repository-url>";
 
 fn main() -> ExitCode {
@@ -139,6 +140,11 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
     };
 
     print!("\n{}", report.render(&info, Palette::for_terminal()));
+
+    // A container disappears after the scan, and a saved copy would go with it.
+    if std::env::var_os(NO_SAVE_VARIABLE).is_some() {
+        return Ok(report.has_findings());
+    }
 
     match saved::save(&report.render(&info, &PLAIN)) {
         Ok(path) => {
