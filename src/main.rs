@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod autorun;
 mod behavior;
 mod fetch;
 mod network;
@@ -12,6 +13,7 @@ mod source;
 mod text;
 
 use archive::{Limits, read_archive};
+use autorun::AutoRun;
 use report::{Kind, PLAIN, Palette, Report, ScanInfo};
 use source::Target;
 use std::error::Error;
@@ -65,6 +67,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
     let reader = fetch::open_archive(&archive_url)?;
 
     let mut report = Report::new();
+    let mut autorun = AutoRun::default();
     let mut files = 0;
     let mut bytes = 0;
 
@@ -78,6 +81,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
         network::scan(&file, &mut report);
         behavior::scan(&file, &mut report);
         opaque::scan(&file, &mut report);
+        autorun.scan(&file);
     })?;
 
     // The host chose what to send, so check it sent what was asked for.
@@ -109,6 +113,8 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
             return Err(format!("this commit has nothing at: {folder}").into());
         }
     }
+
+    autorun.finish(&mut report);
 
     let name = source.name();
     let info = ScanInfo {
