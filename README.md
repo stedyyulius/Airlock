@@ -125,7 +125,7 @@ scams.
 > airlock scan https://github.com/rubenmarcus/malicious-repositories/tree/main/munity-game
 > ```
 
-Results for v0.1.0, on commit
+Results for v0.1.1, on commit
 [`dc82f33`](https://github.com/rubenmarcus/malicious-repositories/tree/dc82f332dae0f4e9ea6bdc1d8341c7743c59913f) of
 the collection. All 14 projects containing code get a DANGER, and the 15th,
 `scammer-documents`, has no code to run.
@@ -224,6 +224,18 @@ applies to running a suspicious repository. Airlock never runs what it scans.
 - Reading the code inside dependencies
 - Following submodules
 - Understanding more of what code does, rather than matching text
+
+## Help improve it
+
+Airlock gets better from real examples, so please
+[open an issue](https://github.com/stedyyulius/Airlock/issues) if you know of:
+
+- A malicious repository, package or trick that Airlock misses
+- A false alarm on honest code
+
+Send a link and the Airlock version, and say what the problem is. Please don't attach
+malware or paste its code into the issue, and don't open it on a computer you care
+about. If you're not sure it's malicious, say so.
 
 ## License
 
