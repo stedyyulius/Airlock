@@ -7,6 +7,7 @@ mod fetch;
 mod git;
 mod links;
 mod network;
+mod obfuscation;
 mod opaque;
 mod osv;
 mod refs;
@@ -81,7 +82,8 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
             network::scan(&file, &mut report);
             behavior::scan(&file, &mut report);
             opaque::scan(&file, &mut report);
-                        autorun.scan(&file);
+            obfuscation::scan(&file, &mut report);
+                    autorun.scan(&file);
             dependencies.scan(&file, &mut report);
             },
     )?;
