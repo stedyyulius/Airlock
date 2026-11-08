@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod behavior;
 mod fetch;
 mod network;
 mod opaque;
@@ -75,6 +76,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
         bytes += file.contents.len() as u64;
 
         network::scan(&file, &mut report);
+        behavior::scan(&file, &mut report);
         opaque::scan(&file, &mut report);
     })?;
 
