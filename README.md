@@ -14,7 +14,12 @@ runs any of its code.
 
 ```sh
 cargo run -- scan https://github.com/owner/repo
+cargo run -- scan https://gitlab.com/group/subgroup/project
+cargo run -- scan https://bitbucket.org/workspace/repo
 ```
+
+Airlock scans public repositories on these three sites. Private repositories and
+self-hosted servers are not supported yet.
 
 Airlock is not published on any package registry yet. `cargo install airlock`
 and `npm install airlock` install unrelated projects that happen to share the
@@ -27,8 +32,6 @@ name, so build from this repository.
 - Obfuscated code, and code that downloads and runs other code
 - Code that reads secrets and sends them elsewhere
 - Suspicious packages, such as lookalikes of popular names
-
-GitHub comes first, with GitLab and Bitbucket to follow.
 
 A scan can reduce your risk, but it can't prove that code is safe. Run code you
 don't trust in an isolated environment, even if it scans clean.

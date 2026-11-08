@@ -12,6 +12,9 @@ const USER_AGENT: &str = concat!("airlock/", env!("CARGO_PKG_VERSION"));
 #[derive(Debug)]
 pub enum FetchError {
     NotFound,
+    /// GitLab answers this way for a repository that is private or missing,
+    /// sending the visitor to its sign-in page.
+    Redirected,
     Status(u16),
     Network(ureq::Error),
 }
@@ -20,6 +23,11 @@ impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => write!(f, "repository not found (it may be private)"),
+            Self::Redirected => write!(
+                f,
+                "the host sent a redirect instead of the archive, so the repository \
+                 may be private, renamed or missing"
+            ),
             Self::Status(code) => write!(f, "server returned HTTP {code}"),
             Self::Network(error) => write!(f, "download failed: {error}"),
         }
@@ -45,6 +53,7 @@ pub fn open_archive(url: &str) -> Result<ureq::BodyReader<'static>, FetchError> 
 
     match agent.get(url).call() {
         Ok(response) if response.status() == HTTP_OK => Ok(response.into_body().into_reader()),
+        Ok(response) if response.status().is_redirection() => Err(FetchError::Redirected),
         Ok(response) => Err(FetchError::Status(response.status().as_u16())),
         Err(ureq::Error::StatusCode(404)) => Err(FetchError::NotFound),
         Err(ureq::Error::StatusCode(code)) => Err(FetchError::Status(code)),

@@ -19,7 +19,7 @@ const LIMITS: &str = "
 Limits of this list
   Only addresses written as plain text can be listed. Encoded, split up or
   downloaded addresses will not appear.
-  A GitHub archive can leave out files that git clone would give you.
+  A downloaded archive can leave out files that git clone would give you.
   Being listed doesn't mean something is malicious, and not being listed
   doesn't mean it is safe.
 
