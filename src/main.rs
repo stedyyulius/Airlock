@@ -87,7 +87,7 @@ fn scan(url: &str) -> Result<bool, Box<dyn Error>> {
             obfuscation::scan(&file, &mut report);
             hidden::scan(&file, &mut report);
             tactics::scan(&file, &mut report);
-            autorun.scan(&file);
+            autorun.scan(&file, &mut report);
             dependencies.scan(&file, &mut report);
             },
     )?;
