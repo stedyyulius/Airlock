@@ -158,6 +158,10 @@ It was also run on 46 widely used open source projects to look for false alarms.
 got no DANGER. Most of the others really do what's flagged, such as piping a download
 into a shell, or use a package listed as malicious, and a few are still false alarms.
 
+Scanning Airlock's own repository shows many DANGER findings, because its source
+contains the patterns it searches for. They're expected, and there's deliberately no
+exception for this repository, because an attacker could copy its name.
+
 ## What it reports
 
 **DANGER:** behavior that could harm your computer.
