@@ -7,3 +7,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/stedyyulius/Airlock"
 
 [dependencies]
+flate2 = "1.1.11"
+tar = "0.4.46"
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+
+# Hostile input should fail loudly, not wrap around silently.
+[profile.release]
+overflow-checks = true
