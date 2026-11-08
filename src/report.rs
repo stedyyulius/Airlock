@@ -22,6 +22,9 @@ const ENTRY_OVERHEAD_BYTES: usize = 128;
 const LOCATION_COLUMN: usize = 67;
 const ALARM_WIDTH: usize = 92;
 const BYTES_PER_MB: f64 = 1_000_000.0;
+const SHORT_COMMIT_CHARS: usize = 7;
+const STAY_CAREFUL: &str =
+    "  Airlock can miss new tricks, so stay careful with code from people you don't know.";
 
 /// How serious a section is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -270,6 +273,7 @@ impl Kind {
 pub struct Palette {
     is_color: bool,
     danger_tag: &'static str,
+    clean_tag: &'static str,
     warning_tag: &'static str,
     note_tag: &'static str,
     danger_title: &'static str,
@@ -286,6 +290,7 @@ const RESET: &str = "\x1b[0m";
 pub const PLAIN: Palette = Palette {
     is_color: false,
     danger_tag: "",
+    clean_tag: "",
     warning_tag: "",
     note_tag: "",
     danger_title: "",
@@ -300,6 +305,7 @@ pub const PLAIN: Palette = Palette {
 pub const COLOR: Palette = Palette {
     is_color: true,
     danger_tag: "\x1b[1;97;41m",
+    clean_tag: "\x1b[1;30;42m",
     warning_tag: "\x1b[1;30;43m",
     note_tag: "\x1b[1;97;100m",
     danger_title: "\x1b[1;91m",
@@ -775,34 +781,7 @@ impl Rendered<'_> {
 
     fn write_alarm(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let palette = self.palette;
-        let dangers = self.report.count_at(Level::Danger);
-
-        let (code, lines) = if dangers > 0 {
-            let plural = if dangers == 1 { "finding" } else { "findings" };
-            (
-                palette.danger_tag,
-                [
-                    format!(
-                        "  DANGER: {dangers} dangerous {plural} in {}",
-                        self.info.name
-                    ),
-                    "  Do not install, build, run or open this repository unless you have checked"
-                        .to_string(),
-                    "  and trust every DANGER item above.".to_string(),
-                ],
-            )
-        } else {
-            (
-                palette.warning_tag,
-                [
-                    "  NO DANGER FOUND. THIS DOES NOT MEAN THE REPOSITORY IS SAFE.".to_string(),
-                    "  Airlock only recognizes known patterns, and malicious code can hide from it."
-                        .to_string(),
-                    "  Check the warnings above, and run code you don't trust in an isolated environment."
-                        .to_string(),
-                ],
-            )
-        };
+        let (code, lines) = self.closing_message();
 
         writeln!(f)?;
         if palette.is_color {
@@ -815,6 +794,86 @@ impl Rendered<'_> {
             writeln!(f, "{}", palette.alarm(code, ""))?;
         }
         Ok(())
+    }
+
+    /// The last thing people read, and often the only thing, so it says what was
+    /// found without promising anything about what wasn't. "Looks clean" is kept
+    /// for a scan that read everything and has nothing at all to warn about.
+    fn closing_message(&self) -> (&'static str, [String; 3]) {
+        let (report, info, palette) = (self.report, self.info, self.palette);
+        let dangers = report.count_at(Level::Danger);
+        let warnings = report.count_at(Level::Warning);
+
+        if dangers > 0 {
+            return (
+                palette.danger_tag,
+                [
+                    format!(
+                        "  DANGER: {dangers} dangerous {} in {}",
+                        plural(dangers, "finding"),
+                        info.name
+                    ),
+                    "  Do not install, build, run or open this repository unless you have checked"
+                        .to_string(),
+                    "  and trust every DANGER item above.".to_string(),
+                ],
+            );
+        }
+
+        let is_incomplete = report.not_listed > 0;
+        if warnings == 0 && !is_incomplete && info.files > 0 {
+            return (
+                palette.clean_tag,
+                [
+                    format!("  LOOKS CLEAN: no signs of malicious code in {}", info.name),
+                    self.what_was_checked(),
+                    STAY_CAREFUL.to_string(),
+                ],
+            );
+        }
+
+        let reason = if warnings > 0 {
+            format!(
+                "  {warnings} {} above {} worth a look before you run this.",
+                plural(warnings, "warning"),
+                if warnings == 1 { "is" } else { "are" }
+            )
+        } else if is_incomplete {
+            "  The list above is incomplete, so this isn't the full picture.".to_string()
+        } else {
+            "  Airlock found no files to read at this commit.".to_string()
+        };
+        (
+            palette.warning_tag,
+            [
+                format!("  NO DANGER FOUND in {}", info.name),
+                reason,
+                STAY_CAREFUL.to_string(),
+            ],
+        )
+    }
+
+    fn what_was_checked(&self) -> String {
+        let info = self.info;
+        let at_commit = info.commit.map_or(String::new(), |commit| {
+            let short = &commit[..commit.len().min(SHORT_COMMIT_CHARS)];
+            format!(" at commit {short}")
+        });
+        format!(
+            "  Checked {} {} and {} {}{at_commit}.",
+            info.files,
+            plural(info.files as usize, "file"),
+            info.packages_checked,
+            plural(info.packages_checked, "package"),
+        )
+    }
+}
+
+fn plural(count: usize, word: &str) -> String {
+    if count == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
     }
 }
 
@@ -995,6 +1054,7 @@ mod tests {
         let mut stripped = text.to_string();
         for code in [
             COLOR.danger_tag,
+            COLOR.clean_tag,
             COLOR.warning_tag,
             COLOR.note_tag,
             COLOR.danger_title,
@@ -1182,15 +1242,114 @@ mod tests {
     }
 
     #[test]
-    fn no_danger_never_reads_as_safe() {
+    fn warnings_with_no_danger_say_how_many_to_look_at() {
         let file = path("a.js");
         let mut report = Report::new();
         report.add(Kind::NetworkCall, "", "https://a.example", at(&file, 1));
 
         let shown = plain(&report);
 
-        assert!(shown.contains("NO DANGER FOUND. THIS DOES NOT MEAN THE REPOSITORY IS SAFE."));
+        assert!(shown.contains("NO DANGER FOUND in github.com/o/r"));
+        assert!(shown.contains("1 warning above is worth a look before you run this."));
+        assert!(!shown.contains("LOOKS CLEAN"));
         assert!(!shown.contains("Do not install"));
+
+        report.add(Kind::NetworkCall, "", "https://b.example", at(&file, 1));
+        assert!(plain(&report).contains("2 warnings above are worth a look"));
+    }
+
+    #[test]
+    fn nothing_found_looks_clean_and_says_what_was_checked() {
+        let shown = plain(&Report::new());
+
+        assert!(shown.contains("LOOKS CLEAN: no signs of malicious code in github.com/o/r"));
+        assert!(shown.contains("Checked 214 files and 12 packages at commit abc123."));
+        assert!(!shown.contains("NO DANGER FOUND"));
+    }
+
+    #[test]
+    fn notes_alone_still_look_clean() {
+        let file = path("README.md");
+        let mut report = Report::new();
+        report.add(
+            Kind::DocumentationAddress,
+            "",
+            "https://a.example",
+            at(&file, 1),
+        );
+
+        assert!(plain(&report).contains("LOOKS CLEAN"));
+    }
+
+    #[test]
+    fn looks_clean_uses_singular_words_and_a_short_commit() {
+        let mut info = info();
+        info.files = 1;
+        info.packages_checked = 1;
+        info.commit = Some("7fd1a60b01f91b314f59955a4e4d4e80d8edf11d");
+
+        let shown = Report::new().render(&info, &PLAIN);
+
+        assert!(shown.contains("Checked 1 file and 1 package at commit 7fd1a60."));
+    }
+
+    #[test]
+    fn no_result_ever_promises_a_repository_is_safe() {
+        let file = path("a.js");
+        let mut warned = Report::new();
+        warned.add(Kind::NetworkCall, "", "x", at(&file, 1));
+        let mut danger = Report::new();
+        danger.add(Kind::DownloadsAndRuns, "", "x", at(&file, 1));
+
+        for report in [Report::new(), warned, danger] {
+            let closing = plain(&report);
+            let closing = closing.rsplit(" SUMMARY ").next().unwrap().to_lowercase();
+
+            assert!(!closing.contains("is safe"), "{closing}");
+            assert!(!closing.contains("no malware"), "{closing}");
+        }
+    }
+
+    #[test]
+    fn something_unread_or_a_cut_off_list_can_never_look_clean() {
+        let mut unread = Report::new();
+        unread.add_detail(Kind::NotRead, "big.bin", "too large (5 bytes)");
+        let mut not_checked = Report::new();
+        not_checked.add_detail(Kind::DependencyNotChecked, "9 packages", "OSV was down");
+        let mut cut_off = Report::new();
+        cut_off.note_not_listed(3);
+
+        for report in [unread, not_checked, cut_off] {
+            let shown = plain(&report);
+
+            assert!(!shown.contains("LOOKS CLEAN"), "{shown}");
+            assert!(shown.contains("NO DANGER FOUND"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_commit_with_no_files_does_not_look_clean() {
+        let mut info = info();
+        info.files = 0;
+
+        let shown = Report::new().render(&info, &PLAIN);
+
+        assert!(!shown.contains("LOOKS CLEAN"));
+        assert!(shown.contains("Airlock found no files to read"));
+    }
+
+    #[test]
+    fn only_a_fully_empty_result_is_green() {
+        let file = path("a.js");
+        let mut warned = Report::new();
+        warned.add(Kind::NetworkCall, "", "x", at(&file, 1));
+
+        assert!(
+            Report::new()
+                .render(&info(), &COLOR)
+                .contains(COLOR.clean_tag)
+        );
+        assert!(!warned.render(&info(), &COLOR).contains(COLOR.clean_tag));
     }
 
     #[test]
@@ -1200,7 +1359,7 @@ mod tests {
         assert!(
             shown
                 .trim_end()
-                .ends_with("run code you don't trust in an isolated environment.")
+                .ends_with("stay careful with code from people you don't know.")
         );
     }
 
