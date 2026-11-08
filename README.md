@@ -85,8 +85,9 @@ open an issue if it happens. Don't turn your antivirus off for this.
 
 ## How it works
 
-1. **It finds the commit.** Airlock asks the host which commit your link means,
-   the same first step `git clone` takes.
+1. **It finds the newest version.** A commit is a saved snapshot of every file in a
+   repository. A link alone doesn't say which snapshot you mean, so Airlock asks
+   the host which commit it points to, the same first step `git clone` takes.
 2. **It reads that commit into memory.** It uses the git protocol over HTTPS, so
    it receives exactly what `git clone` would. It doesn't use the `.tar.gz` that
    hosts offer for download, because one line in a repository's `.gitattributes`
@@ -109,6 +110,53 @@ capped so a small download can't expand until memory runs out, anything Airlock
 prints is escaped so a file name can't send commands to your terminal, and
 Airlock contains no `unsafe` Rust. A limit that would leave the scan incomplete
 stops the scan with an error, rather than letting it look complete.
+
+## How it's been tested
+
+Airlock has been run against
+[rubenmarcus/malicious-repositories](https://github.com/rubenmarcus/malicious-repositories),
+a public collection of real malicious projects, many of them from fake job interview
+scams.
+
+> **This is real malware. Don't clone, install, open or run any of it.** Airlock is
+> safe to point at it, because it only reads the files in memory:
+>
+> ```sh
+> airlock scan https://github.com/rubenmarcus/malicious-repositories/tree/main/munity-game
+> ```
+
+Results for v0.1.0, on commit
+[`dc82f33`](https://github.com/rubenmarcus/malicious-repositories/tree/dc82f332dae0f4e9ea6bdc1d8341c7743c59913f) of
+the collection. All 14 projects containing code get a DANGER, and the 15th,
+`scammer-documents`, has no code to run.
+
+| Project | What Airlock flags |
+|---|---|
+| `0xnfteth-horsepowerfi` | Hides where it connects to, in `server/controllers/userController.js` |
+| `challenge-experiment-module` | Malicious package `rest-icon-orchestrator` |
+| `coinpool-rental-platform1.0` | Malicious package `process-log` |
+| `DEX-staking-project-ultrax` | Malicious package `vite-tsconsole-log` |
+| `erc20-token-dapp` | Malicious packages `cdn-icon-fetch` and `cdn-icon-fetcher` |
+| `golden-city` | Runs what it downloads, in `backend/controllers/userController.js` |
+| `multify_staking` | Obfuscated `next.config.js`, which runs automatically |
+| `munity-game` | Obfuscated code 908 spaces off screen, in `server/routes/paymentRoute.js` |
+| `real_estate` | Runs what it downloads, in `server/controllers/userController.js` |
+| `real_estate_new` | Runs what it downloads, in `server/controllers/paymentController.js` |
+| `real-estate-rental-platform` | Runs what it downloads, in `server/controllers/paymentController.js` |
+| `sarostech-assessment` | Runs what it downloads, in `server/config/getContract.js` |
+| `trend-dev-preproduction` | Runs what it downloads, in `backend/controller.js` |
+| `web3game` | Runs what it downloads, plus an obfuscated `server/middlewares/helpers/error.js` |
+
+How far to trust this:
+
+- **It doesn't show Airlock catches all malware.** A DANGER means it found at least
+  one real sign, which isn't always every malicious part of a project.
+- **Airlock was tuned on this collection.** Its checks were improved after missing
+  two of these projects, so expect it to do less well on malware it hasn't seen.
+
+It was also run on 46 widely used open source projects to look for false alarms. 30
+got no DANGER. Most of the others really do what's flagged, such as piping a download
+into a shell, or use a package listed as malicious, and a few are still false alarms.
 
 ## What it reports
 
