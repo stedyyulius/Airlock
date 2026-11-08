@@ -5,6 +5,7 @@ mod fetch;
 mod network;
 mod opaque;
 mod report;
+mod saved;
 mod source;
 mod text;
 
@@ -12,6 +13,7 @@ use archive::{Limits, read_archive};
 use report::{Kind, Report};
 use source::Source;
 use std::error::Error;
+use std::fmt::Write;
 use std::process::ExitCode;
 use text::escape;
 
@@ -57,10 +59,31 @@ fn scan(url: &str) -> Result<(), Box<dyn Error>> {
     }
     report.note_not_listed(summary.skipped_total - summary.skipped.len() as u64);
 
+    let mut results = String::new();
     if let Some(commit) = &summary.commit {
-        println!("commit: {commit}");
+        writeln!(results, "commit: {commit}")?;
     }
-    println!("read {} files ({} bytes)", summary.files, summary.bytes);
-    print!("{report}");
+    writeln!(
+        results,
+        "read {} files ({} bytes)",
+        summary.files, summary.bytes
+    )?;
+    write!(results, "{report}")?;
+    print!("{results}");
+
+    match saved::save(&format!("scanned {archive_url}\n{results}")) {
+        Ok(path) => {
+            println!(
+                "\nAirlock keeps one report file and each scan replaces it, \
+                 so copy it if you want to keep it."
+            );
+            println!("To see this report in a file, go here: {}", path.display());
+        }
+        // The report is already on screen, so this doesn't fail the scan.
+        Err(error) => eprintln!(
+            "\ncould not save the report to a file: {}",
+            escape(&error.to_string())
+        ),
+    }
     Ok(())
 }

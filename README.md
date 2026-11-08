@@ -21,6 +21,10 @@ cargo run -- scan https://bitbucket.org/workspace/repo
 Airlock scans public repositories on these three sites. Private repositories and
 self-hosted servers are not supported yet.
 
+The report prints in your terminal, and the last line shows where to find a copy
+in a file, `~/.airlock/report.txt`. Each scan replaces that file, so copy it if
+you want to keep it. It holds only Airlock's report, never the repository's files.
+
 Airlock is not published on any package registry yet. `cargo install airlock`
 and `npm install airlock` install unrelated projects that happen to share the
 name, so build from this repository.
