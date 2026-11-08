@@ -24,3 +24,6 @@ ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 # Hostile input should fail loudly, not wrap around silently.
 [profile.release]
 overflow-checks = true
+
+[target."cfg(windows)".dependencies]
+enable-ansi-support = "0.3.1"

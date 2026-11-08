@@ -199,7 +199,9 @@ impl Kind {
             Self::LongCodeLine => "Very long lines of code in files that are hard to review",
             Self::EncodedBlob => "Long blocks of encoded data inside code",
             Self::HiddenData => "Extra data hidden inside a media file",
-            Self::UnusualCharacters => "Characters that can hide text, in tests or terminal output",
+            Self::UnusualCharacters => {
+                "Characters that can hide text, in tests, bundled code or terminal output"
+            }
             Self::RunsOnBuild => "Runs when you build, test or start this project",
             Self::AutoRun => "Runs automatically when installed or opened",
             Self::AiInstructions => "Instructions that AI coding tools will read and may follow",
@@ -319,7 +321,10 @@ impl Palette {
         let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
         let term = std::env::var("TERM").ok();
 
-        let windows_console_ok = env("WT_SESSION").is_some()
+        // Asking comes first, because it's what turns color on. The rest are
+        // terminals that handle color themselves and may refuse the request.
+        let windows_console_ok = (is_terminal && windows_console_accepts_color())
+            || env("WT_SESSION").is_some()
             || env("TERM_PROGRAM").is_some()
             || env("ConEmuANSI").is_some()
             || term.is_some();
@@ -377,6 +382,17 @@ impl Palette {
     }
 }
 
+/// Asks Windows to understand color codes, which older versions can't do.
+#[cfg(windows)]
+fn windows_console_accepts_color() -> bool {
+    enable_ansi_support::enable_ansi_support().is_ok()
+}
+
+#[cfg(not(windows))]
+fn windows_console_accepts_color() -> bool {
+    false
+}
+
 fn wants_color(
     is_terminal: bool,
     no_color: bool,
@@ -387,7 +403,8 @@ fn wants_color(
     if !is_terminal || no_color || term == Some("dumb") {
         return false;
     }
-    // Old Windows consoles print color codes as text.
+    // Old Windows consoles print color codes as text, unless they accept the
+    // request to understand them.
     if is_windows {
         windows_console_ok
     } else {
