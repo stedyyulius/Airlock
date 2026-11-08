@@ -6,7 +6,7 @@
 //! whoever does it, and the report describes the behavior without calling it
 //! malware.
 
-use crate::archive::ArchiveFile;
+use crate::git::RepoFile;
 use crate::network::{
     CALL, DECODE, FileClass, LineCounter, classify, is_binary, nearby_lines, surrounding_line,
 };
@@ -63,7 +63,7 @@ const NEARBY_WINDOW_BYTES: usize = 1200;
 
 /// Records dangerous behavior in a file. Documentation is skipped, because an
 /// install command in a README isn't running anything.
-pub fn scan(file: &ArchiveFile, report: &mut Report) {
+pub fn scan(file: &RepoFile, report: &mut Report) {
     if classify(file.path.raw()) != FileClass::Code || is_binary(&file.contents) {
         return;
     }
@@ -73,7 +73,7 @@ pub fn scan(file: &ArchiveFile, report: &mut Report) {
     scan_text_runners(file, report);
 }
 
-fn add_matches(file: &ArchiveFile, pattern: &Regex, kind: Kind, report: &mut Report) {
+fn add_matches(file: &RepoFile, pattern: &Regex, kind: Kind, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, false);
 
@@ -92,7 +92,7 @@ fn add_matches(file: &ArchiveFile, pattern: &Regex, kind: Kind, report: &mut Rep
     }
 }
 
-fn scan_text_runners(file: &ArchiveFile, report: &mut Report) {
+fn scan_text_runners(file: &RepoFile, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, false);
 
@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn scan_text(path: &str, contents: &[u8]) -> Report {
-        let file = ArchiveFile {
+        let file = RepoFile {
             path: Untrusted::from_bytes(path.as_bytes()),
             contents: contents.to_vec(),
         };

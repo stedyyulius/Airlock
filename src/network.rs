@@ -5,7 +5,7 @@
 //! as a call to it. It will miss anything encoded or split up, which is why
 //! calls with no visible address get their own section in the report.
 
-use crate::archive::ArchiveFile;
+use crate::git::RepoFile;
 use crate::report::{At, Call, Kind, Report};
 use crate::text::Untrusted;
 use regex::bytes::Regex;
@@ -147,7 +147,7 @@ pub(crate) enum FileClass {
 }
 
 /// Records every address and network call in a file.
-pub fn scan(file: &ArchiveFile, report: &mut Report) {
+pub fn scan(file: &RepoFile, report: &mut Report) {
     let class = classify(file.path.raw());
     let binary = is_binary(&file.contents);
 
@@ -161,7 +161,7 @@ pub fn scan(file: &ArchiveFile, report: &mut Report) {
     }
 }
 
-fn scan_urls(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Report) {
+fn scan_urls(file: &RepoFile, class: FileClass, binary: bool, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, binary);
 
@@ -199,7 +199,7 @@ fn scan_urls(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Re
 }
 
 fn remember_call(
-    file: &ArchiveFile,
+    file: &RepoFile,
     group: &str,
     subject: &str,
     line: Option<u64>,
@@ -215,7 +215,7 @@ fn remember_call(
     );
 }
 
-fn scan_ips(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Report) {
+fn scan_ips(file: &RepoFile, class: FileClass, binary: bool, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, binary);
 
@@ -248,7 +248,7 @@ fn scan_ips(file: &ArchiveFile, class: FileClass, binary: bool, report: &mut Rep
 /// Lists calls with no address beside them. These matter most when nothing else
 /// shows up, because `fetch(atob("..."))` leaves no address to find. When text
 /// is being decoded just before the call, that looks deliberate.
-fn scan_calls(file: &ArchiveFile, class: FileClass, report: &mut Report) {
+fn scan_calls(file: &RepoFile, class: FileClass, report: &mut Report) {
     let contents = file.contents.as_slice();
     let mut lines = LineCounter::new(contents, false);
 
@@ -557,7 +557,7 @@ mod tests {
     use super::*;
 
     fn scan_text(path: &str, contents: &[u8]) -> Report {
-        let file = ArchiveFile {
+        let file = RepoFile {
             path: Untrusted::from_bytes(path.as_bytes()),
             contents: contents.to_vec(),
         };

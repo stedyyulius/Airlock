@@ -36,8 +36,8 @@ impl fmt::Display for FetchError {
             Self::NotFound => write!(f, "repository not found (it may be private)"),
             Self::Redirected => write!(
                 f,
-                "the host sent a redirect instead of the archive, so the repository \
-                 may be private, renamed or missing"
+                "the host sent a redirect instead of the repository, so it may be \
+                 private, renamed or missing"
             ),
             Self::Status(code) => write!(f, "server returned HTTP {code}"),
             Self::Network(error) => write!(f, "download failed: {error}"),
@@ -61,11 +61,19 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// Starts a download and returns a reader over the response body.
+/// Sends `body` and returns a reader over the response.
 ///
-/// The body is not read here: whoever consumes it applies the size limits.
-pub fn open_archive(url: &str) -> Result<ureq::BodyReader<'static>, FetchError> {
-    let response = check_status(agent().get(url).call())?;
+/// The response is not read here: whoever consumes it applies the size limits.
+pub fn post_stream(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<ureq::BodyReader<'static>, FetchError> {
+    let mut request = agent().post(url);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = check_status(request.send(body))?;
     Ok(response.into_body().into_reader())
 }
 

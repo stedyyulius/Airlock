@@ -3,7 +3,7 @@
 //! The check reads each file's first bytes rather than trusting its name, so a
 //! program renamed to `logo.png` is still found, and is reported as disguised.
 
-use crate::archive::ArchiveFile;
+use crate::git::RepoFile;
 use crate::network::is_binary;
 use crate::report::{Kind, Report};
 
@@ -62,7 +62,7 @@ impl Packed {
 }
 
 /// Records a file if it is a compiled program or a compressed archive.
-pub fn scan(file: &ArchiveFile, report: &mut Report) {
+pub fn scan(file: &RepoFile, report: &mut Report) {
     let Some(packed) = identify(&file.contents) else {
         return;
     };
@@ -113,7 +113,7 @@ mod tests {
     use crate::text::Untrusted;
 
     fn scan_file(path: &str, contents: &[u8]) -> Report {
-        let file = ArchiveFile {
+        let file = RepoFile {
             path: Untrusted::from_bytes(path.as_bytes()),
             contents: contents.to_vec(),
         };

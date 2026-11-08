@@ -1,12 +1,13 @@
-//! Works out which branch or tag a pasted folder link means.
+//! Works out which commit a pasted link means.
 //!
-//! In `.../tree/feature/x/src`, the branch could be `feature` or `feature/x`, and
-//! the URL alone can't say which. So this asks the repository, using the same
-//! git protocol that `git clone` starts with. It only lists names and commits,
-//! and it works without logging in on all three hosts.
+//! A plain repository link means the commit its default branch is on. In
+//! `.../tree/feature/x/src`, the branch could be `feature` or `feature/x`, and the
+//! URL alone can't say which. So this asks the repository, using the same git
+//! protocol that `git clone` starts with. It only lists names and commits, and it
+//! works without logging in on all three hosts.
 
-use crate::archive::is_commit_id;
 use crate::fetch::{self, FetchError};
+use crate::git::is_commit_id;
 use crate::source::Source;
 use std::fmt;
 
@@ -14,14 +15,15 @@ use std::fmt;
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 /// Branch names are short, and this bounds the size of the question.
 const MAX_SEGMENTS_TRIED: usize = 16;
+pub const DEFAULT_BRANCH: &str = "default branch";
 
-/// What a branch or folder link refers to.
+/// What a link refers to.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Resolved {
     pub commit: String,
-    /// The branch or tag name, as the link gave it.
+    /// The branch or tag name, as the link gave it. Empty for a plain link.
     pub reference: String,
-    /// What `reference` is: a branch, a tag or a commit.
+    /// What `reference` is: a branch, a tag, a commit or the default branch.
     pub reference_kind: &'static str,
     /// The folder or file inside the repository, if the link named one.
     pub folder: Option<String>,
@@ -31,6 +33,7 @@ pub struct Resolved {
 #[derive(Debug)]
 pub enum RefError {
     NotFound(String),
+    Empty,
     Malformed,
     Fetch(FetchError),
 }
@@ -39,6 +42,7 @@ impl fmt::Display for RefError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound(view) => write!(f, "no branch or tag matches this link: {view}"),
+            Self::Empty => write!(f, "this repository has no commits"),
             Self::Malformed => write!(f, "the host sent an unreadable list of branches"),
             Self::Fetch(error) => write!(f, "could not list branches: {error}"),
         }
@@ -47,8 +51,55 @@ impl fmt::Display for RefError {
 
 impl std::error::Error for RefError {}
 
-/// Finds the commit and folder that a link's `view` text refers to.
-pub fn resolve(source: &Source, view: &str) -> Result<Resolved, RefError> {
+/// Finds the commit and folder a link refers to. `view` is the part after the
+/// repository's own address, if there is any.
+pub fn resolve(source: &Source, view: Option<&str>) -> Result<Resolved, RefError> {
+    match view {
+        Some(view) => resolve_view(source, view),
+        None => resolve_default_branch(source),
+    }
+}
+
+fn ask(source: &Source, request: &str) -> Result<Vec<Ref>, RefError> {
+    let response = fetch::post(
+        &format!("{}/git-upload-pack", source.git_url()),
+        &[
+            ("Content-Type", "application/x-git-upload-pack-request"),
+            ("Accept", "application/x-git-upload-pack-result"),
+            ("Git-Protocol", "version=2"),
+        ],
+        request.as_bytes(),
+        MAX_RESPONSE_BYTES,
+    )
+    .map_err(RefError::Fetch)?;
+
+    parse_refs(&response).ok_or(RefError::Malformed)
+}
+
+fn resolve_default_branch(source: &Source) -> Result<Resolved, RefError> {
+    let refs = ask(source, &default_branch_request())?;
+    let head = refs
+        .iter()
+        .find(|found| found.name == "HEAD")
+        .ok_or(RefError::Empty)?;
+
+    Ok(Resolved {
+        commit: head.commit.clone(),
+        reference: String::new(),
+        reference_kind: DEFAULT_BRANCH,
+        folder: None,
+    })
+}
+
+fn default_branch_request() -> String {
+    let mut body = packet("command=ls-refs\n");
+    body.push_str("0001");
+    body.push_str(&packet("ref-prefix HEAD\n"));
+    body.push_str("0000");
+    body
+}
+
+fn resolve_view(source: &Source, view: &str) -> Result<Resolved, RefError> {
     let segments: Vec<&str> = view.split('/').collect();
 
     if is_commit_id(segments[0]) {
@@ -60,19 +111,7 @@ pub fn resolve(source: &Source, view: &str) -> Result<Resolved, RefError> {
         });
     }
 
-    let response = fetch::post(
-        &format!("{}/git-upload-pack", source.git_url()),
-        &[
-            ("Content-Type", "application/x-git-upload-pack-request"),
-            ("Accept", "application/x-git-upload-pack-result"),
-            ("Git-Protocol", "version=2"),
-        ],
-        request_body(&segments).as_bytes(),
-        MAX_RESPONSE_BYTES,
-    )
-    .map_err(RefError::Fetch)?;
-
-    let refs = parse_refs(&response).ok_or(RefError::Malformed)?;
+    let refs = ask(source, &request_body(&segments))?;
     choose(&segments, &refs).ok_or_else(|| RefError::NotFound(view.to_string()))
 }
 
@@ -202,6 +241,14 @@ mod tests {
         ] {
             assert!(body.contains(prefix), "missing: {prefix}");
         }
+    }
+
+    #[test]
+    fn asks_only_about_the_default_branch_for_a_plain_link() {
+        assert_eq!(
+            default_branch_request(),
+            "0014command=ls-refs\n00010014ref-prefix HEAD\n0000"
+        );
     }
 
     #[test]

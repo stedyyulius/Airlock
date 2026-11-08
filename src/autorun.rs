@@ -5,7 +5,7 @@
 //! internet, which can't be known until all the files have been read, so
 //! `finish` does that part.
 
-use crate::archive::ArchiveFile;
+use crate::git::RepoFile;
 use crate::network::{CALL, URL, clean_url, host_of};
 use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
@@ -73,7 +73,7 @@ pub struct AutoRun {
 
 impl AutoRun {
     /// Looks for hooks in a file.
-    pub fn scan(&mut self, file: &ArchiveFile) {
+    pub fn scan(&mut self, file: &RepoFile) {
         let path = file.path.raw().replace('\\', "/");
         let lower = path.to_ascii_lowercase();
         let name = lower.rsplit('/').next().unwrap_or(&lower);
@@ -113,7 +113,7 @@ impl AutoRun {
         }
     }
 
-    fn add_whole_file(&mut self, file: &ArchiveFile, trigger: &'static str, path: &str) {
+    fn add_whole_file(&mut self, file: &RepoFile, trigger: &'static str, path: &str) {
         self.push(Hook {
             trigger,
             command: String::new(),
@@ -123,7 +123,7 @@ impl AutoRun {
         });
     }
 
-    fn scan_package_json(&mut self, file: &ArchiveFile, folder: &str) {
+    fn scan_package_json(&mut self, file: &RepoFile, folder: &str) {
         // A file npm can't parse can't run anything. The dependency check reports
         // that it couldn't be read.
         let Ok(root) = serde_json::from_slice::<Value>(&file.contents) else {
@@ -147,7 +147,7 @@ impl AutoRun {
         }
     }
 
-    fn scan_vscode_tasks(&mut self, file: &ArchiveFile, path: &str, folder: &str) {
+    fn scan_vscode_tasks(&mut self, file: &RepoFile, path: &str, folder: &str) {
         if !RUNS_ON_FOLDER_OPEN.is_match(&file.contents) {
             return;
         }
@@ -171,7 +171,7 @@ impl AutoRun {
 
     fn add_commands(
         &mut self,
-        file: &ArchiveFile,
+        file: &RepoFile,
         field: &Regex,
         trigger: &'static str,
         folder: &str,
@@ -293,8 +293,8 @@ mod tests {
     use super::*;
     use crate::report::Call;
 
-    fn file(path: &str, contents: &str) -> ArchiveFile {
-        ArchiveFile {
+    fn file(path: &str, contents: &str) -> RepoFile {
+        RepoFile {
             path: Untrusted::from_bytes(path.as_bytes()),
             contents: contents.as_bytes().to_vec(),
         }
@@ -308,7 +308,7 @@ mod tests {
         }
     }
 
-    fn scan_all(files: &[ArchiveFile], report: &mut Report) {
+    fn scan_all(files: &[RepoFile], report: &mut Report) {
         let mut autorun = AutoRun::default();
         for file in files {
             autorun.scan(file);

@@ -118,26 +118,6 @@ impl Source {
     pub fn git_url(&self) -> String {
         format!("https://{}.git", self.name())
     }
-
-    /// The URL of a tarball containing the repository's default branch.
-    pub fn archive_url(&self) -> String {
-        self.archive_url_at("HEAD")
-    }
-
-    /// The URL of a tarball containing one commit.
-    pub fn archive_url_at(&self, commit: &str) -> String {
-        match self {
-            Self::GitHub { owner, repo } => {
-                format!("https://codeload.github.com/{owner}/{repo}/tar.gz/{commit}")
-            }
-            Self::GitLab { namespace, project } => format!(
-                "https://gitlab.com/{namespace}/{project}/-/archive/{commit}/{project}-{commit}.tar.gz"
-            ),
-            Self::Bitbucket { workspace, repo } => {
-                format!("https://bitbucket.org/{workspace}/{repo}/get/{commit}.tar.gz")
-            }
-        }
-    }
 }
 
 fn split_path(path: &str) -> Vec<&str> {
@@ -234,7 +214,7 @@ fn is_valid_name(name: &str) -> bool {
 }
 
 /// Decodes the branch and folder part of a link and checks each piece of it.
-/// This text only ever selects files by name inside the archive and is never
+/// This text only ever selects files by name inside the repository and is never
 /// used as a real path, but anything odd is still refused.
 fn parse_view(segments: &[&str], path: &str) -> Result<String, SourceError> {
     let invalid = || SourceError::InvalidPath(path.to_string());
@@ -320,14 +300,6 @@ mod tests {
         ] {
             assert_eq!(Target::parse(url), expected(), "input: {url:?}");
         }
-    }
-
-    #[test]
-    fn builds_github_archive_url() {
-        assert_eq!(
-            github("foundry-rs", "foundry").archive_url(),
-            "https://codeload.github.com/foundry-rs/foundry/tar.gz/HEAD"
-        );
     }
 
     #[test]
@@ -437,38 +409,6 @@ mod tests {
                 "input: {url:?}"
             );
         }
-    }
-
-    #[test]
-    fn builds_gitlab_archive_url() {
-        assert_eq!(
-            gitlab("gitlab-org/api", "client-go").archive_url(),
-            "https://gitlab.com/gitlab-org/api/client-go/-/archive/HEAD/client-go-HEAD.tar.gz"
-        );
-    }
-
-    #[test]
-    fn builds_bitbucket_archive_url() {
-        assert_eq!(
-            bitbucket("atlassian", "aws-s3-deploy").archive_url(),
-            "https://bitbucket.org/atlassian/aws-s3-deploy/get/HEAD.tar.gz"
-        );
-    }
-
-    #[test]
-    fn builds_archive_urls_for_one_commit() {
-        assert_eq!(
-            github("o", "r").archive_url_at("abc123"),
-            "https://codeload.github.com/o/r/tar.gz/abc123"
-        );
-        assert_eq!(
-            gitlab("g/s", "p").archive_url_at("abc123"),
-            "https://gitlab.com/g/s/p/-/archive/abc123/p-abc123.tar.gz"
-        );
-        assert_eq!(
-            bitbucket("w", "r").archive_url_at("abc123"),
-            "https://bitbucket.org/w/r/get/abc123.tar.gz"
-        );
     }
 
     #[test]

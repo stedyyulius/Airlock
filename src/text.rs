@@ -1,4 +1,4 @@
-//! Text that came from a repository, an archive or a server.
+//! Text that came from a repository or a server.
 //!
 //! An attacker chooses these bytes. A file name can contain terminal escape
 //! sequences that clear the screen, print a fake verdict or write to the

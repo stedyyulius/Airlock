@@ -7,7 +7,7 @@
 //! Formats are read as text where a full parser would be a large dependency, and
 //! every parser accepts anything: a malformed file gets reported, never trusted.
 
-use crate::archive::ArchiveFile;
+use crate::git::RepoFile;
 use crate::network::LineCounter;
 use crate::osv::{self, Advisory};
 use crate::report::{At, Kind, Report};
@@ -95,7 +95,7 @@ fn folder_of(path: &str) -> &str {
 
 impl Dependencies {
     /// Reads a file's packages, if it's a kind of file that lists them.
-    pub fn scan(&mut self, file: &ArchiveFile, report: &mut Report) {
+    pub fn scan(&mut self, file: &RepoFile, report: &mut Report) {
         let lower = file.path.raw().to_ascii_lowercase().replace('\\', "/");
         let name = lower.rsplit('/').next().unwrap_or(&lower);
         let Some((ecosystem, parser)) = parser_for(name) else {
@@ -849,7 +849,7 @@ mod tests {
 
     fn scan_file(deps: &mut Dependencies, report: &mut Report, path: &str, contents: &str) {
         deps.scan(
-            &ArchiveFile {
+            &RepoFile {
                 path: Untrusted::from_bytes(path.as_bytes()),
                 contents: contents.as_bytes().to_vec(),
             },

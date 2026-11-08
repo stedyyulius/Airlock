@@ -730,9 +730,9 @@ impl Rendered<'_> {
         let palette = self.palette;
         let mut lines = vec![
             " Airlock read this repository in memory. None of its files were saved or run.",
-            " Only addresses written as plain text can be listed. Encoded, split up or",
-            " downloaded addresses will not appear. A downloaded archive can leave out files",
-            " that git clone would give you.",
+            " It looks for known tricks and doesn't understand what code really does, so new",
+            " tricks can get past it, and it can't see what code downloads once it runs.",
+            " This report covers the commit above. A later commit could be different.",
         ];
         if self.info.path.is_some() {
             lines.push(" Only this path was scanned, not the rest of the repository.");
