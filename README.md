@@ -16,10 +16,12 @@ runs any of its code.
 cargo run -- scan https://github.com/owner/repo
 cargo run -- scan https://gitlab.com/group/subgroup/project
 cargo run -- scan https://bitbucket.org/workspace/repo
+cargo run -- scan https://github.com/owner/repo/tree/main/some-folder
 ```
 
 Airlock scans public repositories on these three sites. Private repositories and
-self-hosted servers are not supported yet.
+self-hosted servers are not supported yet. A link to a branch or folder scans only
+that branch or folder.
 
 The report prints in your terminal, and the last line shows where to find a copy
 in a file, `~/.airlock/report.txt`. Each scan replaces that file, so copy it if

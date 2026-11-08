@@ -417,7 +417,7 @@ fn commit_from_global_header(data: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn is_commit_id(value: &str) -> bool {
+pub(crate) fn is_commit_id(value: &str) -> bool {
     matches!(value.len(), SHA1_HEX_LEN | SHA256_HEX_LEN)
         && value
             .bytes()
