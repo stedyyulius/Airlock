@@ -8,8 +8,8 @@
 
 use crate::git::RepoFile;
 use crate::network::{
-    CALL, DECODE, FileClass, LineCounter, classify, is_binary, is_in_comment, nearby_lines,
-    surrounding_line,
+    CALL, DECODE, FileClass, LineCounter, classify, is_binary, is_in_comment, is_local,
+    nearby_lines, surrounding_line,
 };
 use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
@@ -299,7 +299,10 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
         let gets_its_code_elsewhere = flags
             .iter()
             .any(|flag| matches!(flag, b'c' | b'e' | b'n' | b'p' | b'r'));
-        if gets_its_code_elsewhere || is_in_comment(contents, found.start(), file.path.raw()) {
+        if gets_its_code_elsewhere
+            || is_in_comment(contents, found.start(), file.path.raw())
+            || (found.as_bytes().ends_with(b"://") && starts_with_local_host(after))
+        {
             continue;
         }
 
@@ -315,6 +318,15 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
             }),
         );
     }
+}
+
+/// `import('http://localhost:3000/a.js')` isn't downloading anything from outside.
+fn starts_with_local_host(address: &[u8]) -> bool {
+    let end = address
+        .iter()
+        .position(|byte| matches!(byte, b'/' | b':' | b'"' | b'\'' | b'`'))
+        .unwrap_or(address.len());
+    std::str::from_utf8(&address[..end]).is_ok_and(is_local)
 }
 
 /// `document.body` and the like aren't the answer to a web request.
@@ -855,6 +867,18 @@ mod tests {
             let report = scan_text("a.sh", line.as_bytes());
 
             assert!(!report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn importing_from_this_computer_is_not_a_download() {
+        for line in [
+            "await import('http://localhost:4545/a.js')",
+            "await import(\"http://127.0.0.1:3000/a.js\")",
+        ] {
+            let report = scan_text("a.js", line.as_bytes());
+
+            assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
         }
     }
 

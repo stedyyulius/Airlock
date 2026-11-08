@@ -31,7 +31,8 @@ const ALWAYS_DANGEROUS: [(Kind, &str); 5] = [
           | \bpty\.spawn\s*\(\s*["']/bin/
           | (?s:\bsocket\.socket\s*\(.{0,400}?\bdup2\s*\(\s*\w+\.fileno\(\)\s*,\s*[012]\s*\))
           | \b(?:eval|assert|system|exec|passthru|shell_exec|popen|proc_open)\s*\(\s*(?:base64_decode\s*\(\s*)?\$_(?:get|post|request|cookie|server)\b
-          | \b(?:eval|exec|execsync|spawn|spawnsync|system|popen)\s*\(\s*(?:await\s+)?req(?:uest)?\.(?:query|body|params|args|form|headers|cookies)\b
+          | (?:^|[^.\w$])(?:eval|exec|execsync|spawn|spawnsync|system|popen)\s*\(\s*(?:await\s+)?req(?:uest)?\.(?:query|body|params|args|form|headers|cookies)\b
+          | \b(?:child_process|childprocess|child|cp|proc|subprocess)\.(?:exec|execsync|spawn|spawnsync|run|popen)\s*\(\s*(?:await\s+)?req(?:uest)?\.(?:query|body|params|args|form|headers|cookies)\b
           | \bos\.(?:system|popen)\s*\(\s*request\.
         "#,
     ),
@@ -506,6 +507,28 @@ mod tests {
                 "{line}"
             );
         }
+    }
+
+    #[test]
+    fn a_regular_expression_checking_a_request_is_not_a_backdoor() {
+        for line in [
+            "const m = CREDENTIALS.exec(req.headers.get('Authorization') || '');",
+            "/^a/.exec(req.query.name)",
+            "pattern.exec(request.body.text)",
+        ] {
+            assert_eq!(
+                count(&scan_text("a.js", line, false), Kind::RemoteControl),
+                0,
+                "{line}"
+            );
+        }
+        assert_eq!(
+            count(
+                &scan_text("a.js", "child_process.exec(req.query.cmd)", false),
+                Kind::RemoteControl
+            ),
+            1
+        );
     }
 
     #[test]

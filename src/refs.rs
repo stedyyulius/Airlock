@@ -44,7 +44,7 @@ impl fmt::Display for RefError {
             Self::NotFound(view) => write!(f, "no branch or tag matches this link: {view}"),
             Self::Empty => write!(f, "this repository has no commits"),
             Self::Malformed => write!(f, "the host sent an unreadable list of branches"),
-            Self::Fetch(error) => write!(f, "could not list branches: {error}"),
+            Self::Fetch(error) => write!(f, "could not read the repository: {error}"),
         }
     }
 }

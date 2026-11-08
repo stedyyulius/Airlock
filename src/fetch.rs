@@ -116,7 +116,8 @@ fn check_status(
         Ok(response) if response.status() == HTTP_OK => Ok(response),
         Ok(response) if response.status().is_redirection() => Err(FetchError::Redirected),
         Ok(response) => Err(FetchError::Status(response.status().as_u16())),
-        Err(ureq::Error::StatusCode(404)) => Err(FetchError::NotFound),
+        // Git hosts answer 401 for a repository that's private or doesn't exist.
+        Err(ureq::Error::StatusCode(401 | 404)) => Err(FetchError::NotFound),
         Err(ureq::Error::StatusCode(code)) => Err(FetchError::Status(code)),
         Err(error) => Err(FetchError::Network(error)),
     }
