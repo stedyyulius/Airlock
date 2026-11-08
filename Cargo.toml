@@ -1,10 +1,19 @@
 [package]
-name = "airlock"
+name = "airlock-scan"
 version = "0.1.0"
 edition = "2024"
 description = "Check a repository for malicious code before it reaches your machine"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/stedyyulius/Airlock"
+readme = "README.md"
+keywords = ["security", "malware", "scanner", "supply-chain", "cli"]
+categories = ["command-line-utilities"]
+include = ["src/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-*"]
+
+# The name `airlock` is taken on crates.io, but the command is still `airlock`.
+[[bin]]
+name = "airlock"
+path = "src/main.rs"
 
 [dependencies]
 flate2 = "1.1.11"

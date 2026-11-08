@@ -13,6 +13,7 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM scratch
+LABEL org.opencontainers.image.source="https://github.com/stedyyulius/Airlock"
 COPY --from=build /airlock/target/release/airlock /airlock
 # The container is gone after the scan, so a saved copy would be lost with it.
 ENV AIRLOCK_NO_SAVE=1

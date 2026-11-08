@@ -10,41 +10,60 @@ runs any of its code.
 > dangerous behavior, but it can't prove that code is safe, and it never says
 > so. Do not rely on it alone to decide whether code is safe.
 
-## Usage
+## Install
 
-Airlock has no published releases yet, so for now you build it from this
-repository, which takes [Rust](https://rustup.rs). Once releases exist, you'll be
-able to download a single program and won't need Rust.
+Download the program for your computer and run it. It's one file, and you don't
+need Rust or anything else installed.
+
+| Computer | File |
+|---|---|
+| Linux, Intel or AMD | `airlock-linux-x86_64` |
+| Linux, ARM | `airlock-linux-arm64` |
+| Mac, Apple silicon | `airlock-macos-arm64` |
+| Mac, Intel | `airlock-macos-x86_64` |
+| Windows | `airlock-windows-x86_64.exe` |
+
+On Linux or a Mac, swapping in the right file name:
 
 ```sh
-git clone https://github.com/stedyyulius/Airlock
-cd Airlock
-cargo build --release --locked
+curl -fsSL -o airlock https://github.com/stedyyulius/Airlock/releases/latest/download/airlock-linux-x86_64
+chmod +x airlock
+sudo mv airlock /usr/local/bin/
 ```
 
-Then scan a repository, branch or folder:
+On Windows, download the file from the
+[latest release](https://github.com/stedyyulius/Airlock/releases/latest), rename it
+`airlock.exe`, and put it in a folder on your `PATH`.
+
+There's no install script to pipe into a shell on purpose, since that's one of the
+things Airlock warns about. To check that a download was really built from this
+repository, run `gh attestation verify airlock --repo stedyyulius/Airlock`.
+
+Other ways to get it:
 
 ```sh
-./target/release/airlock scan https://github.com/owner/repo
-./target/release/airlock scan https://gitlab.com/group/subgroup/project
-./target/release/airlock scan https://bitbucket.org/workspace/repo
-./target/release/airlock scan https://github.com/owner/repo/tree/main/some-folder
+# With Rust. The package is airlock-scan, and the command is airlock.
+cargo install airlock-scan --locked
+
+# With Docker. The image holds only the Airlock program.
+docker run --rm -t --read-only --cap-drop=ALL ghcr.io/stedyyulius/airlock scan https://github.com/owner/repo
+```
+
+The Docker image doesn't save a copy of the report. To keep one, leave out `-t` and
+add `> report.txt` to the end of the command.
+
+## Usage
+
+```sh
+airlock scan https://github.com/owner/repo
+airlock scan https://gitlab.com/group/subgroup/project
+airlock scan https://bitbucket.org/workspace/repo
+airlock scan https://github.com/owner/repo/tree/main/some-folder
 ```
 
 Airlock scans public repositories on these three sites. Private repositories and
 self-hosted servers are not supported yet. A link to a branch or folder scans only
 that branch or folder.
-
-Or, if you have Docker, build an image and you don't need Rust at all:
-
-```sh
-docker build -t airlock https://github.com/stedyyulius/Airlock.git
-docker run --rm -t --read-only --cap-drop=ALL airlock scan https://github.com/owner/repo
-```
-
-The image holds only the Airlock program, with no shell or other tools. It doesn't
-save a copy of the report, so to keep one, leave out `-t` and add
-`> report.txt` to the end of the command.
 
 The report prints in your terminal, and the last line shows where to find a copy
 in a file, `~/.airlock/report.txt`. Each scan replaces that file, so copy it if
@@ -56,11 +75,10 @@ To check dependencies, Airlock sends package names and versions to the public
 The exit code is 0 if there was nothing to report, 1 if there are findings to
 review, and 2 if the scan couldn't finish.
 
-Airlock is not published on any package registry yet. `cargo install airlock`
-and `npm install airlock` install unrelated projects that happen to share the
-name, so build from this repository.
+`cargo install airlock` and `npm install airlock` install unrelated projects that
+happen to share the name, so use the package name above.
 
-Your antivirus might flag your build, because the program contains text describing
+Your antivirus might flag Airlock, because the program contains text describing
 what malware does, in order to search for it. Windows Defender did this during
 development. Read the source and build it yourself if you're unsure, and please
 open an issue if it happens. Don't turn your antivirus off for this.
@@ -133,11 +151,17 @@ stops the scan with an error, rather than letting it look complete.
 A scan can reduce your risk, but it can't prove that code is safe. Run code you
 don't trust in an isolated environment, even if it scans clean.
 
+A virtual machine is the safer choice for that. A Docker container still has the
+network, plus any folders and secrets you give it, unless you turn those off. That
+applies to running a suspicious repository. Airlock never runs what it scans.
+
 - **What code downloads when it runs.** Airlock can flag the download, but the
   thing being downloaded isn't in the repository.
 - **The code inside dependencies.** Packages are looked up by name and version, so
   a malicious package nobody has reported yet won't appear.
 - **Submodules.** They're other repositories, so they're listed but not scanned.
+- **Files attached to releases.** They're uploaded separately from the code, so a
+  repository with clean code can still offer a malicious download.
 - **Compiled programs.** They're listed, but not analyzed.
 - **New tricks.** Airlock recognizes known patterns and doesn't understand what
   code really does. Attackers can read this source too.
