@@ -3,6 +3,7 @@
 mod archive;
 mod fetch;
 mod network;
+mod opaque;
 mod report;
 mod source;
 mod text;
@@ -47,6 +48,7 @@ fn scan(url: &str) -> Result<(), Box<dyn Error>> {
     let mut report = Report::new();
     let summary = read_archive(reader, &Limits::default(), |file| {
         network::scan(&file, &mut report);
+        opaque::scan(&file, &mut report);
     })?;
 
     for skipped in &summary.skipped {
