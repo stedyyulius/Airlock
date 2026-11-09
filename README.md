@@ -125,7 +125,7 @@ scams.
 > airlock scan https://github.com/rubenmarcus/malicious-repositories/tree/main/munity-game
 > ```
 
-Results for v0.1.1, on commit
+Results for v0.1.2, on commit
 [`dc82f33`](https://github.com/rubenmarcus/malicious-repositories/tree/dc82f332dae0f4e9ea6bdc1d8341c7743c59913f) of
 the collection. All 14 projects containing code get a DANGER, and the 15th,
 `scammer-documents`, has no code to run.
@@ -154,7 +154,7 @@ How far to trust this:
 - **Airlock was tuned on this collection.** Its checks were improved after missing
   two of these projects, so expect it to do less well on malware it hasn't seen.
 
-It was also run on 46 widely used open source projects to look for false alarms. 32
+It was also run on 47 widely used open source projects to look for false alarms. 33
 got no DANGER. Most of the others really do what's flagged, such as piping a download
 into a shell, or use a package listed as malicious, and a few are still false alarms.
 
